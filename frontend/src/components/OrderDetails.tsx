@@ -1,6 +1,7 @@
 import React from 'react';
 import { Order } from '../types';
 import { formatBYN } from '../utils/currency';
+import StatusBar from './StatusBar';
 
 interface Props {
   order: Order;
@@ -13,10 +14,9 @@ export default function OrderDetails({ order, onAddItem, onDelete, onStatus }: P
   return (
     <section className="order-details">
       <h2>{order.number}</h2>
-      <p>Status: {order.status}</p>
+      <StatusBar current={order.status} onChange={(s: number) => onStatus(order.id, s)} />
       <p>Created: {new Date(order.createdAt).toLocaleString()}</p>
       <button onClick={onAddItem}>➕ Add Item</button>
-      <button onClick={() => onStatus(order.id, order.status + 1)}>↻ Next Status</button>
       <button onClick={() => onDelete(order.id)}>🗑 Delete Order</button>
 
       <ul>

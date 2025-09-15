@@ -32,6 +32,13 @@ export interface PresetCategory {
   extras: PresetExtra[];
 }
 
+export interface Material {
+  id: number;
+  name: string;
+  unit: string;
+  quantity: number;
+}
+
 export interface MaterialRow {
   materialId: number;
   qtyPerItem: number;

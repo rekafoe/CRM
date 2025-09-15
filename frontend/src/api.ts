@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { Order, Item, PresetCategory, MaterialRow } from './types';
+import { Order, Item, PresetCategory, MaterialRow, Material } from './types';
 
 const api = axios.create({ baseURL: '/api' });
 
@@ -15,9 +15,9 @@ export const deleteOrder = (id: number) => api.delete(`/orders/${id}`);
 export const deleteOrderItem = (orderId: number, itemId: number) =>
   api.delete(`/orders/${orderId}/items/${itemId}`);
 
-export const getMaterials = () => api.get<MaterialRow[]>('/materials');
-export const saveMaterial = (mat: Partial<MaterialRow>) =>
-  api.post<MaterialRow[]>('/materials', mat);
+export const getMaterials = () => api.get<Material[]>('/materials');
+export const saveMaterial = (mat: Partial<Material>) =>
+  api.post<Material[]>('/materials', mat);
 export const deleteMaterial = (id: number) => api.delete(`/materials/${id}`);
 
 export const getProductMaterials = (cat: string, desc: string) =>

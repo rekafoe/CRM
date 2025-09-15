@@ -88,7 +88,7 @@ async function main() {
     })
   )
 
-  // POST /api/orders/:id/items — добавить позицию и списать материалы
+  // POST /api/orders/:id/items — добавить позицию и списать материалы (атомарно)
   app.post(
     '/api/orders/:id/items',
     asyncHandler(async (req, res) => {
@@ -113,48 +113,56 @@ async function main() {
         params.description
       )
 
-      // Транзакция: проверка и списание
+      // Транзакция: проверка остатков, списание и вставка позиции
       await db.run('BEGIN')
-      for (const n of needed) {
-        if (n.quantity < n.qtyPerItem) {
-          throw new Error(`Недостаточно материала ID=${n.materialId}`)
+      try {
+        for (const n of needed) {
+          if (n.quantity < n.qtyPerItem) {
+            const err: any = new Error(`Недостаточно материала ID=${n.materialId}`)
+            err.status = 400
+            throw err
+          }
+          await db.run(
+            'UPDATE materials SET quantity = quantity - ? WHERE id = ?',
+            n.qtyPerItem,
+            n.materialId
+          )
         }
-        await db.run(
-          'UPDATE materials SET quantity = quantity - ? WHERE id = ?',
-          n.qtyPerItem,
-          n.materialId
+
+        const insertItem = await db.run(
+          'INSERT INTO items (orderId, type, params, price) VALUES (?, ?, ?, ?)',
+          orderId,
+          type,
+          JSON.stringify(params),
+          price
         )
-      }
-      await db.run('COMMIT')
+        const itemId = insertItem.lastID!
+        const rawItem = await db.get<{
+          id: number
+          orderId: number
+          type: string
+          params: string
+          price: number
+        }>(
+          'SELECT id, orderId, type, params, price FROM items WHERE id = ?',
+          itemId
+        )
 
-      // Вставляем позицию
-      const insertItem = await db.run(
-        'INSERT INTO items (orderId, type, params, price) VALUES (?, ?, ?, ?)',
-        orderId,
-        type,
-        JSON.stringify(params),
-        price
-      )
-      const itemId = insertItem.lastID!
-      const rawItem = await db.get<{
-        id: number
-        orderId: number
-        type: string
-        params: string
-        price: number
-      }>(
-        'SELECT id, orderId, type, params, price FROM items WHERE id = ?',
-        itemId
-      )
+        await db.run('COMMIT')
 
-      const item: Item = {
-        id: rawItem!.id,
-        orderId: rawItem!.orderId,
-        type: rawItem!.type,
-        params: JSON.parse(rawItem!.params),
-        price: rawItem!.price
+        const item: Item = {
+          id: rawItem!.id,
+          orderId: rawItem!.orderId,
+          type: rawItem!.type,
+          params: JSON.parse(rawItem!.params),
+          price: rawItem!.price
+        }
+        res.status(201).json(item)
+        return
+      } catch (e) {
+        await db.run('ROLLBACK')
+        throw e
       }
-      res.status(201).json(item)
     })
   )
 
@@ -196,21 +204,31 @@ async function main() {
     '/api/materials',
     asyncHandler(async (req, res) => {
       const mat = req.body as Material
-      if (mat.id) {
-        await db.run(
-          'UPDATE materials SET name = ?, unit = ?, quantity = ? WHERE id = ?',
-          mat.name,
-          mat.unit,
-          mat.quantity,
-          mat.id
-        )
-      } else {
-        await db.run(
-          'INSERT INTO materials (name, unit, quantity) VALUES (?, ?, ?)',
-          mat.name,
-          mat.unit,
-          mat.quantity
-        )
+      try {
+        if (mat.id) {
+          await db.run(
+            'UPDATE materials SET name = ?, unit = ?, quantity = ? WHERE id = ?',
+            mat.name,
+            mat.unit,
+            mat.quantity,
+            mat.id
+          )
+        } else {
+          await db.run(
+            'INSERT INTO materials (name, unit, quantity) VALUES (?, ?, ?)',
+            mat.name,
+            mat.unit,
+            mat.quantity
+          )
+        }
+      } catch (e: any) {
+        // Обрабатываем конфликт уникальности имени
+        if (e && typeof e.message === 'string' && e.message.includes('UNIQUE constraint failed: materials.name')) {
+          const err: any = new Error('Материал с таким именем уже существует')
+          err.status = 409
+          throw err
+        }
+        throw e
       }
       const allMats = await db.all<Material>(
         'SELECT * FROM materials ORDER BY name'

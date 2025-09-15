@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { MaterialRow } from '../types';
+import { Material } from '../types';
 import { getMaterials, saveMaterial, deleteMaterial } from '../api';
 
 interface FormState {
@@ -14,7 +14,7 @@ interface Props {
 }
 
 export default function ManageMaterialsModal({ onClose }: Props) {
-  const [materials, setMaterials] = useState<MaterialRow[]>([]);
+  const [materials, setMaterials] = useState<Material[]>([]);
   const [edit, setEdit] = useState<FormState>({ name: '', unit: '', quantity: 0 });
 
   useEffect(() => {
@@ -41,12 +41,12 @@ export default function ManageMaterialsModal({ onClose }: Props) {
         </thead>
         <tbody>
           {materials.map(m => (
-            <tr key={m.materialId}>
+            <tr key={m.id}>
               <td>{m.name}</td>
               <td>{m.unit}</td>
               <td>{m.quantity}</td>
               <td>
-                <button onClick={() => deleteMaterial(m.materialId).then(load)}>✖</button>
+                <button onClick={() => deleteMaterial(m.id).then(load)}>✖</button>
               </td>
             </tr>
           ))}

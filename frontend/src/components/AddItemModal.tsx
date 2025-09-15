@@ -10,7 +10,13 @@ interface Props {
 }
 
 export default function AddItemModal({ order, onSave, onClose }: Props) {
-  const [presets] = useState<PresetCategory[]>(defaultPresets);
+  const [presets] = useState<PresetCategory[]>(() => {
+    const stored = localStorage.getItem('crmPresets');
+    if (stored) {
+      try { return JSON.parse(stored) as PresetCategory[]; } catch {}
+    }
+    return defaultPresets;
+  });
   const [category, setCategory] = useState<PresetCategory | null>(null);
   const [product, setProduct] = useState<PresetCategory['items'][0] | null>(null);
   const [price, setPrice] = useState(0);

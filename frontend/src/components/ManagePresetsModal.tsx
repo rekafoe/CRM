@@ -15,7 +15,7 @@ type NewExtraForm = { name: string; price: string; type: 'checkbox' | 'number'; 
 export default function ManagePresetsModal({ onClose, onSave }: Props) {
   // Инициализируем из localStorage или дефолтными
   const [presets, setPresets] = useState<PresetCategory[]>(() => {
-    const stored = localStorage.getItem('presets');
+    const stored = localStorage.getItem('crmPresets');
     if (stored) {
       try {
         return JSON.parse(stored) as PresetCategory[];
@@ -32,7 +32,7 @@ export default function ManagePresetsModal({ onClose, onSave }: Props) {
 
   // Сохранить всё в localStorage и закрыть
   function handleSaveAll() {
-    localStorage.setItem('presets', JSON.stringify(presets));
+    localStorage.setItem('crmPresets', JSON.stringify(presets));
     onSave();
   }
 
