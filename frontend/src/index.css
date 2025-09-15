@@ -1,0 +1,125 @@
+:root {
+  --primary: #1976d2;
+  --primary-hover: #115293;
+  --bg: #fafafa;
+  --panel-bg: #fff;
+  --border: #e0e0e0;
+  --text: #333;
+  --text-light: #666;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  font-family: Arial, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* контейнер всего приложения */
+.app {
+  display: flex;
+  height: 100%;
+}
+
+/* левый сайдбар со списком заказов */
+.sidebar {
+  width: 280px;
+  background: var(--panel-bg);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+}
+
+/* заголовок и кнопка в сайдбаре */
+.sidebar h2 {
+  font-size: 1.25rem;
+  margin-bottom: 12px;
+}
+.add-order-btn {
+  margin-top: auto;
+  padding: 8px;
+  background: var(--primary);
+  color: #fff;
+  border-radius: 4px;
+  text-align: center;
+  transition: background .2s;
+}
+.add-order-btn:hover {
+  background: var(--primary-hover);
+}
+
+/* сам список заказов */
+.order-list {
+  list-style: none;
+  overflow-y: auto;
+}
+.order-item {
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background .2s, border-color .2s;
+}
+.order-item:hover {
+  border-color: var(--primary);
+}
+.order-item.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+/* правая панель с деталями заказа */
+.detail {
+  flex: 1;
+  padding: 24px;
+  background: var(--panel-bg);
+  display: flex;
+  flex-direction: column;
+}
+
+/* шапка деталей: номер заказа + кнопки */
+.detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+.detail-header h2 {
+  font-size: 1.5rem;
+}
+.detail-actions button {
+  margin-left: 8px;
+  padding: 6px 12px;
+  background: var(--primary);
+  color: #fff;
+  border-radius: 4px;
+  transition: background .2s;
+}
+.detail-actions button:hover {
+  background: var(--primary-hover);
+}
+
+/* тело деталей: список позиций, сумма и т.д. */
+.detail-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* небольшой отступ между позициями */
+.detail-body .item {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.detail-body .item:last-child {
+  border-bottom: none;
+}
