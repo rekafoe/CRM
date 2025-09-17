@@ -2,7 +2,6 @@
 
 import React, { useState } from 'react';
 import { PresetCategory, PresetItem, PresetExtra } from '../types';
-import { defaultPresets } from '../presets';
 
 interface Props {
   onClose: () => void;
@@ -14,7 +13,7 @@ type NewExtraForm = { name: string; price: string; type: 'checkbox' | 'number'; 
 
 export default function ManagePresetsModal({ onClose, onSave }: Props) {
   const isAdmin = typeof window !== 'undefined' && localStorage.getItem('crmRole') === 'admin';
-  // Инициализируем из localStorage или дефолтными
+  // Инициализируем из localStorage или пустым массивом
   const [presets, setPresets] = useState<PresetCategory[]>(() => {
     const stored = localStorage.getItem('crmPresets');
     if (stored) {
@@ -24,7 +23,7 @@ export default function ManagePresetsModal({ onClose, onSave }: Props) {
         // игнорируем ошибку парсинга
       }
     }
-    return defaultPresets;
+    return [];
   });
 
   // Формы для добавления новых items и extras

@@ -64,15 +64,16 @@ export default function ManageMaterialsModal({ onClose }: Props) {
       </div>
       <table>
         <thead>
-          <tr><th>Name</th><th>Unit</th><th>Qty</th><th>Min</th><th/></tr>
+          <tr><th>Name</th><th>Unit</th><th>Qty</th><th>Min</th><th>Цена листа (1-стор)</th><th/></tr>
         </thead>
         <tbody>
           {materials.map(m => (
             <tr key={m.id}>
               <td>{m.name}</td>
               <td>{m.unit}</td>
-              <td style={{ color: (m.min_quantity != null && m.quantity <= (m.min_quantity||0)) ? '#c00' : undefined }}>{m.quantity}</td>
+              <td style={{ color: (m.quantity != null && m.quantity <= (m.quantity||0)) ? '#c00' : undefined }}>{m.quantity}</td>
               <td>{m.min_quantity ?? ''}</td>
+              <td>{m.sheet_price_single ?? ''}</td>
               <td>
                 <button onClick={() => deleteMaterial(m.id).then(load)}>✖</button>
               </td>
@@ -105,6 +106,15 @@ export default function ManageMaterialsModal({ onClose }: Props) {
                 type="number"
                 value={edit.min_quantity ?? 0}
                 onChange={e => setEdit(s => ({ ...s, min_quantity: Number(e.target.value) }))}
+              />
+            </td>
+            <td>
+              <input
+                type="number"
+                step="0.001"
+                value={(edit as any).sheet_price_single ?? ''}
+                onChange={e => setEdit(s => ({ ...s, sheet_price_single: e.target.value === '' ? undefined : Number(e.target.value) }) as any)}
+                placeholder="BYN/лист (1-стор)"
               />
             </td>
             <td>

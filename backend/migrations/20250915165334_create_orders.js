@@ -1,27 +1,14 @@
-/**
- * @param { import("knex").Knex } knex
- * @returns { Promise<void> }
- */
-exports.up = function(knex) {
-  
-};
+import { Knex } from 'knex';
 
-/**
- * @param { import("knex").Knex } knex
- * @returns { Promise<void> }
- */
-exports.down = function(knex) {
-  
-};
-exports.up = function(knex) {
+export async function up(knex: Knex): Promise<void> {
   return knex.schema.createTable('orders', table => {
     table.increments('id').primary();
     table.string('customer_name').notNullable();
     table.decimal('total_amount', 14, 2).defaultTo(0);
     table.timestamp('created_at').defaultTo(knex.fn.now());
   });
-};
+}
 
-exports.down = function(knex) {
+export async function down(knex: Knex): Promise<void> {
   return knex.schema.dropTableIfExists('orders');
-};
+}

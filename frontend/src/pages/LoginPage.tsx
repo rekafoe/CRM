@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { setAuthToken } from '../api';
+import { APP_CONFIG } from '../types';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 
@@ -15,7 +16,9 @@ export default function LoginPage() {
     try {
       const res = await axios.post('/api/auth/login', { email, password });
       setAuthToken(res.data.token);
-      localStorage.setItem('crmRole', res.data.role || '');
+      localStorage.setItem(APP_CONFIG.storage.role, res.data.role || '');
+      if (res.data.user_id) localStorage.setItem(APP_CONFIG.storage.userId, String(res.data.user_id));
+      if (res.data.session_date) localStorage.setItem(APP_CONFIG.storage.sessionDate, String(res.data.session_date));
       navigate('/', { replace: true });
     } catch (e: any) {
       setError('Неверный email или пароль');

@@ -1,6 +1,7 @@
 // frontend/src/pages/DailyReportPage.tsx
 import React, { useEffect, useState } from 'react';
-import { getDailyReports, getDailyReportByDate, updateDailyReport, createDailyReport, getUsers, getPrinters, submitPrinterCounter, getPrinterCountersByDate, getDailySummary } from '../api';
+import { useSearchParams } from 'react-router-dom';
+import { getDailyReports, getDailyReportByDate, updateDailyReport, getUsers, getPrinters, submitPrinterCounter, getPrinterCountersByDate, getDailySummary, getCurrentUser, getFullDailyReport, saveFullDailyReport } from '../api';
 import { DailyReport } from '../types';
 import EditModal from '../components/EditReportModal';
 
@@ -9,8 +10,8 @@ export const DailyReportPage: React.FC = () => {
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [report, setReport] = useState<DailyReport | null>(null);
   const [isModalOpen, setModalOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
   const [filterUserId, setFilterUserId] = useState<number | ''>('');
+  const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
   const [fromDate, setFromDate] = useState<string>('');
   const [toDate, setToDate] = useState<string>('');
   const [users, setUsers] = useState<{ id: number; name: string }[]>([]);
@@ -19,28 +20,74 @@ export const DailyReportPage: React.FC = () => {
   const [counters, setCounters] = useState<Record<number, string>>({});
   const [printerCounters, setPrinterCounters] = useState<any[]>([]);
   const [summary, setSummary] = useState<any | null>(null);
+  const [currentUser, setCurrentUser] = useState<{ id: number; name: string; role: string } | null>(null);
+  const [showAllUsers, setShowAllUsers] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
 
   useEffect(() => {
     getUsers().then(r => setUsers(r.data));
     getPrinters().then(r => setPrinters(r.data));
+    getCurrentUser().then(r => setCurrentUser(r.data)).catch(() => setCurrentUser(null));
+  }, []);
+
+  // Initialize from query params: ?user_id=...&date=YYYY-MM-DD
+  useEffect(() => {
+    const qpUser = searchParams.get('user_id');
+    const qpDate = searchParams.get('date');
+    setSelectedDate(qpDate || null);
+    if (qpUser) {
+      setFilterUserId(Number(qpUser));
+      setShowAllUsers(true);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    getDailyReports().then(res => {
+    loadReports();
+  }, [currentUser, showAllUsers, filterUserId, fromDate, toDate]);
+
+  const loadReports = () => {
+    const params: any = {};
+    
+    if (showAllUsers && currentUser?.role === 'admin') {
+      // Администратор может видеть все отчёты
+      if (filterUserId) {
+        params.user_id = filterUserId;
+      }
+    } else if (currentUser) {
+      // Обычный пользователь видит только свои отчёты
+      params.current_user_id = currentUser.id;
+    }
+    
+    if (fromDate) params.from = fromDate;
+    if (toDate) params.to = toDate;
+    
+    getDailyReports(params).then(res => {
       setHistory(res.data);
       if (res.data.length) {
         setSelectedDate(res.data[0].report_date);
+        setSelectedUserId(res.data[0].user_id ?? null);
       }
     });
-  }, []);
+  };
 
   useEffect(() => {
     if (selectedDate) {
-      getDailyReportByDate(selectedDate)
+      const uid = (currentUser?.role === 'admin' && showAllUsers && filterUserId) ? Number(filterUserId) : currentUser?.id;
+      setSelectedUserId(uid ?? null);
+      getDailyReportByDate(selectedDate, uid ?? undefined)
         .then(res => setReport(res.data))
-        .catch(() => setReport(null));
+        .catch(async () => {
+          // Больше не создаём задним числом; только на сегодня через логин
+          setReport(null);
+        });
       getPrinterCountersByDate(selectedDate).then(r => setPrinterCounters(r.data as any[]));
       getDailySummary(selectedDate).then(r => setSummary(r.data as any));
+      // Reflect in URL for deep-link
+      const next = new URLSearchParams(searchParams);
+      next.set('date', selectedDate);
+      if (uid) next.set('user_id', String(uid)); else next.delete('user_id');
+      setSearchParams(next);
     }
   }, [selectedDate]);
 
@@ -48,53 +95,72 @@ export const DailyReportPage: React.FC = () => {
     <div style={{ display: 'flex', padding: 16 }}>
       <aside style={{ width: 200, marginRight: 16 }}>
         <h2>Архив отчётов</h2>
-        <button
-          style={{ marginBottom: 8 }}
-          onClick={async () => {
-            const today = new Date().toISOString().slice(0,10);
-            setCreating(true);
-            try {
-              await createDailyReport({ report_date: today });
-              const res = await getDailyReports();
-              setHistory(res.data);
-              setSelectedDate(today);
-            } finally { setCreating(false); }
-          }}
-          disabled={creating}
-        >Создать отчёт за сегодня</button>
+        
+        {/* Информация о текущем пользователе */}
+        {currentUser && (
+          <div style={{ 
+            padding: '8px', 
+            backgroundColor: '#f5f5f5', 
+            borderRadius: '4px', 
+            marginBottom: '16px',
+            fontSize: '14px'
+          }}>
+            <div><strong>Пользователь:</strong> {currentUser.name}</div>
+            <div><strong>Роль:</strong> {currentUser.role}</div>
+          </div>
+        )}
+
+        {/* Переключатель режима для администраторов */}
+        {currentUser?.role === 'admin' && (
+          <div style={{ marginBottom: '16px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px' }}>
+              <input 
+                type="checkbox" 
+                checked={showAllUsers} 
+                onChange={e => setShowAllUsers(e.target.checked)}
+              />
+              Показать все отчёты
+            </label>
+          </div>
+        )}
+
+        {/* Кнопка создания отчёта убрана: отчёт создаётся автоматически при логине */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, margin: '8px 0' }}>
-          <select value={filterUserId} onChange={e => setFilterUserId(e.target.value ? +e.target.value : '')}>
-            <option value="">Все пользователи</option>
-            {users.map(u => (
-              <option key={u.id} value={u.id}>{u.name}</option>
-            ))}
-          </select>
-          <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} />
-          <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} />
-          <button onClick={async () => {
-            const res = await getDailyReports({
-              user_id: filterUserId || undefined,
-              from: fromDate || undefined,
-              to: toDate || undefined
-            });
-            const data = res.data;
-            setHistory(data);
-            if (data.length) setSelectedDate(data[0].report_date);
-          }}>Фильтр</button>
+          {/* Фильтр по пользователям - только для администраторов в режиме "все отчёты" */}
+          {currentUser?.role === 'admin' && showAllUsers && (
+            <select value={filterUserId} onChange={e => setFilterUserId(e.target.value ? +e.target.value : '')}>
+              <option value="">Все пользователи</option>
+              {users.map(u => (
+                <option key={u.id} value={u.id}>{u.name}</option>
+              ))}
+            </select>
+          )}
+          
+          <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} placeholder="От даты" />
+          <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} placeholder="До даты" />
+          <button onClick={loadReports}>Обновить</button>
         </div>
         <div style={{ maxHeight: 300, overflowY: 'auto' }}>
           {history.map(r => (
             <div
               key={r.id}
-              onClick={() => setSelectedDate(r.report_date)}
+              onClick={() => { setSelectedDate(r.report_date); setSelectedUserId(r.user_id ?? null); }}
               style={{
                 padding: 8,
                 cursor: 'pointer',
-                background:
-                  r.report_date === selectedDate ? '#eef' : undefined
+                background: r.report_date === selectedDate ? '#eef' : undefined,
+                borderBottom: '1px solid #eee'
               }}
             >
-              {r.report_date} — {r.orders_count}
+              <div style={{ fontWeight: 'bold' }}>{r.report_date}</div>
+              <div style={{ fontSize: '12px', color: '#666' }}>
+                Заказов: {r.orders_count} | Выручка: {r.total_revenue.toLocaleString('ru-RU')} BYN
+              </div>
+              {r.user_name && (
+                <div style={{ fontSize: '11px', color: '#888', fontStyle: 'italic' }}>
+                  Пользователь: {r.user_name}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -103,12 +169,67 @@ export const DailyReportPage: React.FC = () => {
       <section style={{ flex: 1 }}>
         {report ? (
           <>
-            <h2>Отчёт за {selectedDate}</h2>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h2 style={{ margin: 0 }}>Отчёт за {selectedDate}</h2>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button onClick={() => {
+                  if (!selectedDate) return;
+                  const d = new Date(selectedDate);
+                  d.setDate(d.getDate() - 1);
+                  const prev = d.toISOString().slice(0,10);
+                  setSelectedDate(prev);
+                }}>← Предыдущий день</button>
+                <input
+                  type="date"
+                  value={selectedDate || ''}
+                  onChange={e => setSelectedDate(e.target.value)}
+                />
+                <button onClick={() => {
+                  if (!selectedDate) return;
+                  const d = new Date(selectedDate);
+                  d.setDate(d.getDate() + 1);
+                  const next = d.toISOString().slice(0,10);
+                  setSelectedDate(next);
+                }}>Следующий день →</button>
+              </div>
+            </div>
             <p>Заказов: {report.orders_count}</p>
             <p>
               Выручка:{' '}
               {report.total_revenue.toLocaleString('ru-RU')} BYN
             </p>
+            <div style={{ margin: '8px 0', padding: 12, border: '1px dashed #ddd', borderRadius: 6 }}>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+                <div>
+                  <label style={{ fontSize: 12, color: '#666' }}>Фактически в кассе (BYN)</label>
+                  <input
+                    type="number"
+                    value={report.cash_actual ?? ''}
+                    onChange={e => setReport(r => r ? { ...r, cash_actual: Number(e.target.value) } : r)}
+                    style={{ marginLeft: 8 }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, color: '#666' }}>Ожидается по CRM (BYN)</label>
+                  <input type="number" value={report.total_revenue} disabled style={{ marginLeft: 8 }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, color: '#666' }}>Δ Расхождение (BYN)</label>
+                  <input type="number" value={((report.cash_actual ?? 0) - (report.total_revenue || 0)).toFixed(2)} disabled style={{ marginLeft: 8 }} />
+                </div>
+                <button onClick={async () => {
+                  try {
+                    const res = await updateDailyReport(
+                      report.report_date,
+                      { cash_actual: report.cash_actual },
+                      selectedUserId ?? undefined
+                    );
+                    setReport(res.data);
+                    alert('Сохранено');
+                  } catch { alert('Не удалось сохранить фактическую сумму'); }
+                }}>Сохранить факт</button>
+              </div>
+            </div>
             {summary && (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, margin: '8px 0' }}>
                 <div className="order-total"><div className="order-total__line"><span>Позиции</span><span>{summary.items_qty}</span></div><div className="order-total__line"><span>Клики</span><span>{summary.total_clicks}</span></div></div>
@@ -116,9 +237,31 @@ export const DailyReportPage: React.FC = () => {
                 <div className="order-total"><div className="order-total__line"><span>Предоплаты (оплачено)</span><span>{(summary.prepayment?.paid_amount||0).toLocaleString('ru-RU')} BYN</span></div><div className="order-total__line"><span>Ожидает</span><span>{(summary.prepayment?.pending_amount||0).toLocaleString('ru-RU')} BYN</span></div></div>
               </div>
             )}
-            <button onClick={() => setModalOpen(true)}>
-              Редактировать
-            </button>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button onClick={() => setModalOpen(true)}>
+                Редактировать
+              </button>
+              {currentUser?.role === 'admin' && (
+                <button onClick={async () => {
+                  if (!selectedDate) return;
+                  const uid = selectedUserId ?? currentUser?.id;
+                  const full = await getFullDailyReport(selectedDate, uid || undefined);
+                  const orders = full.data.orders || [];
+                  await saveFullDailyReport({
+                    report_date: selectedDate,
+                    user_id: uid || undefined,
+                    orders_count: report.orders_count,
+                    total_revenue: report.total_revenue,
+                    created_at: report.created_at,
+                    updated_at: report.updated_at,
+                    id: report.id,
+                    orders,
+                    report_metadata: full.data.report_metadata
+                  } as any);
+                  alert('Снимок заказов сохранён в отчёте');
+                }}>Сохранить снимок заказов</button>
+              )}
+            </div>
 
             {/* ===== СЧЁТЧИКИ ПРИНТЕРОВ ===== */}
             <div style={{ marginTop: 16, padding: 12, border: '1px solid #e5e7eb', borderRadius: 8, background: '#fff' }}>
@@ -152,6 +295,15 @@ export const DailyReportPage: React.FC = () => {
                 <div style={{ marginTop: 8, color: '#b45309' }}>Внимание: не по всем принтерам внесены показания за выбранную дату.</div>
               )}
             </div>
+            {/* ===== Снимок заказов (для администратора) ===== */}
+            {currentUser?.role === 'admin' && (report as any)?.snapshot_json && (
+              <div style={{ marginTop: 16 }}>
+                <h3 style={{ margin: '8px 0' }}>Снимок заказов на день</h3>
+                <pre style={{ whiteSpace: 'pre-wrap', background: '#f9fafb', padding: 12, borderRadius: 6, border: '1px solid #e5e7eb', maxHeight: 300, overflow: 'auto' }}>
+                  {JSON.stringify(JSON.parse((report as any).snapshot_json || '{}'), null, 2)}
+                </pre>
+              </div>
+            )}
           </>
         ) : (
           <p>Нет доступных данных</p>
@@ -165,7 +317,8 @@ export const DailyReportPage: React.FC = () => {
           onSave={async updates => {
             const res = await updateDailyReport(
               report.report_date,
-              updates
+              updates,
+              selectedUserId ?? undefined
             );
             setReport(res.data);
             // обновим имя пользователя в списке

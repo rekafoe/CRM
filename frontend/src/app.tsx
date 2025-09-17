@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import "./index.css";
+import "./app.css";
 import { Order } from "./types";
 import {
   getOrders,
@@ -13,10 +14,15 @@ import { Link } from 'react-router-dom';
 import AddItemModal from "./components/AddItemModal";
 import ManageMaterialsModal from "./components/ManageMaterialsModal";
 import ManagePresetsModal from "./components/ManagePresetsModal";
+import { PrepaymentModal } from "./components/PrepaymentModal";
+import { AdminMenu } from "./components/AdminMenu";
+import { AdminReportsPage } from "./pages/AdminReportsPage";
 
 import { ProgressBar, OrderStatus } from "./components/order/ProgressBar";
 import { OrderTotal } from "./components/order/OrderTotal";
-import { setAuthToken, getOrderStatuses, listOrderFiles, uploadOrderFile, deleteOrderFile, approveOrderFile, createPrepaymentLink, getLowStock } from './api';
+import { OrderItem } from "./components/OrderItem";
+import { setAuthToken, getOrderStatuses, listOrderFiles, uploadOrderFile, deleteOrderFile, approveOrderFile, createPrepaymentLink, getLowStock, getCurrentUser, getUsers, getDailyReportByDate, createDailyReport } from './api';
+import { APP_CONFIG } from './types';
 import type { OrderFile } from './types';
 
 
@@ -30,17 +36,52 @@ export default function App() {
   const [files, setFiles] = useState<OrderFile[]>([]);
   const [prepayAmount, setPrepayAmount] = useState<string>('');
   const [lowStock, setLowStock] = useState<any[]>([]);
+  const [showPrepaymentModal, setShowPrepaymentModal] = useState(false);
+  const [showAdminMenu, setShowAdminMenu] = useState(false);
+  const [currentPage, setCurrentPage] = useState<string>('orders');
+  const [currentUser, setCurrentUser] = useState<{ id: number; name: string; role: string } | null>(null);
+  const [allUsers, setAllUsers] = useState<Array<{ id: number; name: string }>>([]);
+  const [contextDate, setContextDate] = useState<string>(() => new Date().toISOString().slice(0,10));
+  const [contextUserId, setContextUserId] = useState<number | null>(null);
+  const [showTopPicker, setShowTopPicker] = useState(false);
+
+  function handleLogout() {
+    try {
+      setAuthToken(undefined);
+      localStorage.removeItem('crmRole');
+      localStorage.removeItem('crmSessionDate');
+      localStorage.removeItem('crmUserId');
+    } catch {}
+    location.href = '/login';
+  }
 
   useEffect(() => {
-    loadOrders();
     getOrderStatuses().then(r => setStatuses(r.data));
-    if (typeof window !== 'undefined' && localStorage.getItem('crmRole') === 'admin') {
+    getCurrentUser().then(r => setCurrentUser(r.data)).catch(() => setCurrentUser(null));
+    getUsers().then(r => setAllUsers(r.data)).catch(() => setAllUsers([]));
+    if (typeof window !== 'undefined' && localStorage.getItem(APP_CONFIG.storage.role) === 'admin') {
       getLowStock().then(r => setLowStock(r.data as any[]));
     }
   }, []);
+
+  // Set default context user when currentUser loads
+  useEffect(() => {
+    if (currentUser && !contextUserId) setContextUserId(currentUser.id);
+  }, [currentUser]);
+
+  // Reload orders when context changes and user is known
+  useEffect(() => {
+    if (currentUser) loadOrders();
+  }, [currentUser, contextUserId, contextDate]);
+
   useEffect(() => {
     if (selectedId) {
-      listOrderFiles(selectedId).then(r => setFiles(r.data));
+      listOrderFiles(selectedId).then(r => {
+        setFiles(r.data);
+      }).catch((error) => {
+        console.error('Error loading files for order', selectedId, ':', error);
+        setFiles([]);
+      });
     } else {
       setFiles([]);
     }
@@ -48,8 +89,16 @@ export default function App() {
 
   function loadOrders() {
     getOrders().then((res) => {
-      setOrders(res.data);
-      if (!selectedId && res.data.length) setSelectedId(res.data[0].id);
+      const date = contextDate.slice(0,10);
+      const uid = contextUserId ?? currentUser?.id ?? null;
+      const filtered = res.data
+        .filter(o => String(o.createdAt || '').slice(0,10) === date)
+        .filter(o => uid == null ? true : ((o as any).userId == null || (o as any).userId === uid));
+      setOrders(filtered);
+      if (!selectedId && filtered.length) setSelectedId(filtered[0].id);
+    }).catch((error) => {
+      console.error('Error loading orders:', error);
+      alert('Ошибка загрузки заказов: ' + error.message);
     });
   }
 
@@ -62,36 +111,72 @@ export default function App() {
 
   const selectedOrder = orders.find((o) => o.id === selectedId);
 
+
   return (
     <div className="app">
-      <aside className="sidebar">
-        <Link to="/reports">Ежедневные отчёты</Link>
-        <h2>Заказы</h2>
-        {lowStock.length > 0 && (
-          <div style={{ background: '#fff4e5', border: '1px solid #ffcc80', color: '#7a4f01', padding: 8, borderRadius: 6 }}>
-            Низкие остатки: {lowStock.slice(0,3).map((m: any) => m.name).join(', ')}{lowStock.length>3?'…':''}
+      {currentPage === 'orders' && (
+        <>
+          <div className="app-topbar">
+            <div className="topbar-info">
+              <button className="chip chip--clickable" onClick={() => setShowTopPicker(s => !s)} title="Выбрать пользователя и дату отчёта" aria-label="Выбрать пользователя и дату отчёта">
+                📅 {contextDate} · 👤 {currentUser?.name || ''}
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {currentUser?.role === 'admin' && (
+                <Link to="/reports" title="Ежедневные отчёты" aria-label="Ежедневные отчёты" className="app-icon-btn">📊</Link>
+              )}
+              <button onClick={handleLogout} title="Выйти" aria-label="Выйти" className="app-icon-btn">⎋</button>
+            </div>
           </div>
+          {showTopPicker && (
+            <div className="topbar-picker" onMouseLeave={() => setShowTopPicker(false)}>
+              <div className="row">
+                <span style={{ width: 90 }}>Дата:</span>
+                <input type="date" value={contextDate} onChange={async e => {
+                  setContextDate(e.target.value);
+                  setShowTopPicker(false);
+                  try {
+                    const uid = contextUserId ?? currentUser?.id ?? undefined;
+                    await getDailyReportByDate(e.target.value, uid).catch(() => Promise.resolve());
+                  } finally { loadOrders(); }
+                }} />
+              </div>
+              <div className="row">
+                <span style={{ width: 90 }}>Пользователь:</span>
+                <select value={String(contextUserId ?? currentUser?.id ?? '')} onChange={async e => {
+                  const uid = e.target.value ? Number(e.target.value) : null;
+                  setContextUserId(uid);
+                  setShowTopPicker(false);
+                  try {
+                    await getDailyReportByDate(contextDate, uid ?? undefined).catch(() => Promise.resolve());
+                  } finally { loadOrders(); }
+                }}>
+                  {currentUser?.role === 'admin' ? (
+                    allUsers.map(u => <option key={u.id} value={u.id}>{u.name}</option>)
+                  ) : (
+                    <option value={currentUser?.id}>{currentUser?.name}</option>
+                  )}
+                </select>
+              </div>
+              <div className="note">Отчёт создаётся только в день входа. Переключение даты показывает сохранённые данные.</div>
+            </div>
+          )}
+          <aside className="sidebar">
+        {/* Ссылка на отчёты вынесена в верхнюю панель */}
+        {currentUser?.role === 'admin' && (
+          <button onClick={() => setShowAdminMenu(true)} className="add-order-btn" style={{ marginBottom: 12 }}>🛡️ Админ-панель</button>
         )}
-        
-        <ul className="order-list">
-          {orders.map((o) => (
-            <li
-              key={o.id}
-              className={`order-item ${o.id === selectedId ? "active" : ""}`}
-              onClick={() => setSelectedId(o.id)}
-            >
-              {o.number}
-            </li>
-          ))}
-        </ul>
-        <button className="add-order-btn" onClick={handleCreateOrder}>
-          + Добавить заказ
-        </button>
-        {selectedOrder && (
+
+        <div className="sidebar-toolbar">
+          <button className="icon-btn" title="Добавить заказ" aria-label="Добавить заказ" onClick={handleCreateOrder}>＋</button>
           <button
-            className="btn-danger"
-            style={{ marginTop: 8 }}
+            className="icon-btn"
+            title="Удалить выбранный заказ"
+            aria-label="Удалить выбранный заказ"
+            disabled={!selectedOrder}
             onClick={async () => {
+              if (!selectedOrder) return;
               try {
                 await deleteOrder(selectedOrder.id);
                 setSelectedId(null);
@@ -100,24 +185,93 @@ export default function App() {
                 alert('Не удалось удалить заказ. Возможно нужна авторизация.');
               }
             }}
+          >🗑️</button>
+        </div>
+        
+        <h2>Заказы</h2>
+        {lowStock.length > 0 && (
+          <div style={{ background: '#fff4e5', border: '1px solid #ffcc80', color: '#7a4f01', padding: 8, borderRadius: 6 }}>
+            Низкие остатки: {lowStock.slice(0,3).map((m: any) => m.name).join(', ')}{lowStock.length>3?'…':''}
+          </div>
+        )}
+        
+        <ul className="order-list">
+          {orders.map((o) => {
+            const st = statuses.find(s => s.sort_order === o.status);
+            const maxSort = Math.max(1, ...statuses.map(s => s.sort_order));
+            const pct = Math.max(0, Math.min(100, Math.round(((o.status - 1) / Math.max(1, (maxSort - 1))) * 100)));
+            return (
+              <li
+                key={o.id}
+                className={`order-item order-list__item ${o.id === selectedId ? "active" : ""}`}
+                onClick={() => setSelectedId(o.id)}
+              >
+                <div className="order-item__header">
+                  <span>{o.number}</span>
+                  <span className="order-item__id">ID: {o.id}</span>
+                </div>
+                <div className="order-item__status" style={{ ['--status-color' as any]: st?.color || '#1976d2' }}>
+                  <span className="status-pill">{st?.name || `Статус ${o.status}`}</span>
+                  <div className="status-bar">
+                    <div className="status-bar__fill" style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+        {/* Кнопки добавления/удаления перенесены в панель */}
+        
+        {currentUser?.role === 'admin' && (
+          <button
+            className="add-order-btn"
+            style={{ marginTop: 8 }}
+            onClick={() => setShowMaterials(true)}
           >
-            Удалить заказ
+            📦 Материалы
           </button>
         )}
-        <button
-          className="add-order-btn"
-          style={{ marginTop: 8 }}
-          onClick={() => setShowMaterials(true)}
-        >
-          📦 Материалы
-        </button>
       </aside>
 
       <section className="detail">
         {selectedOrder ? (
           <>
-            <div className="detail-header">
-              <h2>{selectedOrder.number}</h2>
+            <div className="detail-header" style={{ alignItems: 'flex-start' }}>
+              <div>
+                <h2 style={{ marginBottom: 8 }}>{selectedOrder.number}</h2>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <div>
+                    <label style={{ fontSize: 12, color: '#666' }}>Дата</label>
+                    <input type="date" value={contextDate} onChange={async e => {
+                      setContextDate(e.target.value);
+                      try {
+                        const uid = contextUserId ?? currentUser?.id ?? undefined;
+                        await getDailyReportByDate(e.target.value, uid).catch(async () => {
+                          if (uid) await createDailyReport({ report_date: e.target.value, user_id: uid });
+                        });
+                      } finally { loadOrders(); }
+                    }} style={{ marginLeft: 8 }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 12, color: '#666' }}>Пользователь</label>
+                    <select value={String(contextUserId ?? currentUser?.id ?? '')} onChange={async e => {
+                      const uid = e.target.value ? Number(e.target.value) : null;
+                      setContextUserId(uid);
+                      try {
+                        await getDailyReportByDate(contextDate, uid ?? undefined).catch(async () => {
+                          if (uid) await createDailyReport({ report_date: contextDate, user_id: uid });
+                        });
+                      } catch {}
+                    }} style={{ marginLeft: 8 }}>
+                      {currentUser?.role === 'admin' ? (
+                        allUsers.map(u => <option key={u.id} value={u.id}>{u.name}</option>)
+                      ) : (
+                        <option value={currentUser?.id}>{currentUser?.name}</option>
+                      )}
+                    </select>
+                  </div>
+                </div>
+              </div>
               <div className="detail-actions">
                 {/* Управление статусом заказа */}
                 <select
@@ -141,17 +295,23 @@ export default function App() {
                   <button onClick={() => setShowPresets(true)}>Пресеты</button>
                 )}
                 <button onClick={() => setShowAddItem(true)}>+ Позиция</button>
-                <button onClick={() => { setAuthToken(undefined); location.href = '/login'; }}>Выйти</button>
+                {/* Кнопка выхода перенесена в сайдбар */}
               </div>
             </div>
 
             {/* ====== ВСТАВЛЯЕМ ПРОГРЕСС-БАР ====== */}
             <ProgressBar
-              current={String(selectedOrder.status)}
-              totalSteps={Math.max(1, statuses.length || 5)}
+              current={selectedOrder.status}
+              statuses={statuses}
+              onStatusChange={async (newStatus) => {
+                try {
+                  await updateOrderStatus(selectedOrder.id, newStatus);
+                  loadOrders();
+                } catch (e: any) {
+                  alert('Не удалось изменить статус');
+                }
+              }}
               height="12px"
-              fillColor="#1976d2"
-              bgColor="#e0e0e0"
             />
 
             <div className="detail-body">
@@ -159,112 +319,138 @@ export default function App() {
                 <div className="item">Пока нет позиций</div>
               )}
 
-              {selectedOrder.items.map((it) => {
-                const [editing, setEditing] = React.useState(false);
-                const [qty, setQty] = React.useState(it.quantity ?? 1);
-                const [price, setPrice] = React.useState(it.price);
-                const [sides, setSides] = React.useState(it.sides ?? 1);
-                const [sheets, setSheets] = React.useState(it.sheets ?? 0);
-                const [waste, setWaste] = React.useState(it.waste ?? 0);
-                return (
-                  <div className="item" key={it.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{ flex: 1 }}>
-                      <strong>{it.type}</strong> — {it.params.description} —{" "}
-                      {editing ? (
-                        <>
-                          <input type="number" value={price} onChange={e => setPrice(Number(e.target.value))} style={{ width: 100 }} /> BYN ×
-                          <input type="number" value={qty} min={1} onChange={e => setQty(Math.max(1, Number(e.target.value) || 1))} style={{ width: 60, marginLeft: 6 }} />
-                          <select value={sides} onChange={e => setSides(Number(e.target.value))} style={{ marginLeft: 6 }}>
-                            <option value={1}>1 стор.</option>
-                            <option value={2}>2 стор.</option>
-                          </select>
-                          <input type="number" value={sheets} min={0} onChange={e => setSheets(Math.max(0, Number(e.target.value) || 0))} style={{ width: 80, marginLeft: 6 }} placeholder="листы" />
-                          <input type="number" value={waste} min={0} onChange={e => setWaste(Math.max(0, Number(e.target.value) || 0))} style={{ width: 80, marginLeft: 6 }} placeholder="брак" />
-                        </>
-                      ) : (
-                        <>
-                          {it.price.toLocaleString()} BYN × {it.quantity ?? 1}
-                          {typeof it.sides !== 'undefined' ? ` — ${it.sides} стор.` : ''}
-                          {typeof it.sheets !== 'undefined' ? ` — листы: ${it.sheets}` : ''}
-                          {typeof it.waste !== 'undefined' ? ` — брак: ${it.waste}` : ''}
-                        </>
-                      )}
-                    </div>
-                    {editing ? (
-                      <>
-                        <button
-                          onClick={async () => {
-                            try {
-                              await updateOrderItem(selectedOrder.id, it.id, { price, quantity: qty, sides, sheets, waste });
-                              setEditing(false);
-                              loadOrders();
-                            } catch { alert('Не удалось сохранить'); }
-                          }}
-                        >Сохранить</button>
-                        <button className="btn-danger" onClick={() => setEditing(false)}>Отмена</button>
-                      </>
-                    ) : (
-                      <>
-                        <button onClick={() => setEditing(true)}>Редактировать</button>
-                        <button
-                          className="btn-danger"
-                          onClick={async () => {
-                            try {
-                              await deleteOrderItem(selectedOrder.id, it.id);
-                              loadOrders();
-                            } catch (e: any) {
-                              alert('Не удалось удалить позицию. Возможно нужна авторизация.');
-                            }
-                          }}
-                        >
-                          Удалить
-                        </button>
-                      </>
-                    )}
-                  </div>
-                );
-              })}
+              {selectedOrder.items.map((it) => (
+                <OrderItem key={it.id} item={it} orderId={selectedOrder.id} onUpdate={loadOrders} />
+              ))}
             </div>
 
             {/* ====== ФАЙЛЫ ЗАКАЗА ====== */}
             <div className="order-total" style={{ marginTop: 8 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                 <strong>Файлы макетов</strong>
-                <input type="file" onChange={async (e) => {
-                  const f = e.target.files?.[0]
-                  if (!f) return;
-                  try {
-                    await uploadOrderFile(selectedOrder.id, f);
-                    const r = await listOrderFiles(selectedOrder.id);
-                    setFiles(r.data);
-                    e.currentTarget.value = '';
-                  } catch { alert('Не удалось загрузить файл'); }
-                }} />
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  {files.length > 0 && (
+                    <button 
+                      onClick={() => {
+                        // Скачиваем все файлы одним архивом
+                        files.forEach(f => {
+                          const link = document.createElement('a');
+                          link.href = `/api/uploads/${encodeURIComponent(f.filename)}`;
+                          link.download = f.originalName || f.filename;
+                          link.click();
+                        });
+                      }}
+                      style={{ 
+                        fontSize: '12px', 
+                        padding: '4px 8px',
+                        backgroundColor: '#1976d2',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      📥 Скачать все
+                    </button>
+                  )}
+                  <input type="file" onChange={async (e) => {
+                    const f = e.target.files?.[0]
+                    if (!f) return;
+                    try {
+                      await uploadOrderFile(selectedOrder.id, f);
+                      const r = await listOrderFiles(selectedOrder.id);
+                      setFiles(r.data);
+                      e.currentTarget.value = '';
+                    } catch { alert('Не удалось загрузить файл'); }
+                  }} />
+                </div>
               </div>
               <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {files.length === 0 && <span>Файлы не загружены</span>}
                 {files.map(f => (
-                  <div key={f.id} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <a href={`/api/uploads/${encodeURIComponent(f.filename)}`} target="_blank" rel="noreferrer">
-                      {f.originalName || f.filename}
-                    </a>
-                    <span style={{ fontSize: 12, color: '#666' }}>{(f.size ? Math.round(f.size/1024) : 0)} KB</span>
-                    {f.approved ? <span style={{ color: '#2e7d32' }}>✔ утверждено</span> : (
-                      <button onClick={async () => {
-                        try {
-                          await approveOrderFile(selectedOrder.id, f.id);
-                          const r = await listOrderFiles(selectedOrder.id);
-                          setFiles(r.data);
-                        } catch { alert('Не удалось утвердить файл'); }
-                      }}>Утвердить</button>
-                    )}
-                    <button className="btn-danger" onClick={async () => {
-                      try {
-                        await deleteOrderFile(selectedOrder.id, f.id);
-                        const r = await listOrderFiles(selectedOrder.id);
-                        setFiles(r.data);
-                      } catch { alert('Не удалось удалить файл'); }
-                    }}>Удалить</button>
+                  <div key={f.id} style={{ 
+                    display: 'flex', 
+                    gap: 8, 
+                    alignItems: 'center',
+                    padding: '8px',
+                    backgroundColor: '#f5f5f5',
+                    borderRadius: '4px',
+                    fontSize: '14px'
+                  }}>
+                    <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <a 
+                        href={`/api/uploads/${encodeURIComponent(f.filename)}`} 
+                        target="_blank" 
+                        rel="noreferrer"
+                        style={{ textDecoration: 'none', color: '#1976d2' }}
+                      >
+                        {f.originalName || f.filename}
+                      </a>
+                      <span style={{ fontSize: 12, color: '#666' }}>
+                        {(f.size ? Math.round(f.size/1024) : 0)} KB
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                      <button 
+                        onClick={() => {
+                          const link = document.createElement('a');
+                          link.href = `/api/uploads/${encodeURIComponent(f.filename)}`;
+                          link.download = f.originalName || f.filename;
+                          link.click();
+                        }}
+                        style={{ 
+                          fontSize: '12px', 
+                          padding: '2px 6px',
+                          backgroundColor: '#4caf50',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '3px',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        📥
+                      </button>
+                      {f.approved ? (
+                        <span style={{ color: '#2e7d32', fontSize: '12px' }}>✔ утверждено</span>
+                      ) : (
+                        <button 
+                          onClick={async () => {
+                            try {
+                              await approveOrderFile(selectedOrder.id, f.id);
+                              const r = await listOrderFiles(selectedOrder.id);
+                              setFiles(r.data);
+                            } catch { alert('Не удалось утвердить файл'); }
+                          }}
+                          style={{ 
+                            fontSize: '12px', 
+                            padding: '2px 6px',
+                            backgroundColor: '#ff9800',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '3px',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          ✓
+                        </button>
+                      )}
+                      <button 
+                        className="btn-danger" 
+                        onClick={async () => {
+                          try {
+                            await deleteOrderFile(selectedOrder.id, f.id);
+                            const r = await listOrderFiles(selectedOrder.id);
+                            setFiles(r.data);
+                          } catch { alert('Не удалось удалить файл'); }
+                        }}
+                        style={{ 
+                          fontSize: '12px', 
+                          padding: '2px 6px'
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -272,33 +458,85 @@ export default function App() {
 
             {/* ====== ПРЕДОПЛАТА ====== */}
             <div className="order-total" style={{ marginTop: 8 }}>
-              <strong>Предоплата</strong>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
-                <input
-                  type="number"
-                  placeholder="Сумма BYN"
-                  value={prepayAmount}
-                  onChange={e => setPrepayAmount(e.target.value)}
-                  style={{ maxWidth: 160 }}
-                />
-                <button onClick={async () => {
-                  try {
-                    const amt = prepayAmount ? Number(prepayAmount) : undefined;
-                    const res = await createPrepaymentLink(selectedOrder.id, amt);
-                    await loadOrders();
-                    setPrepayAmount(String(res.data.prepaymentAmount ?? ''));
-                  } catch { alert('Не удалось создать ссылку'); }
-                }}>Сформировать ссылку</button>
-                {selectedOrder.paymentUrl && (
-                  <>
-                    <a href={selectedOrder.paymentUrl} target="_blank" rel="noreferrer">Перейти к оплате</a>
-                    <button onClick={() => navigator.clipboard.writeText(selectedOrder.paymentUrl || '')}>Копировать</button>
-                  </>
-                )}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <strong>💳 Предоплата</strong>
+                <button 
+                  onClick={() => setShowPrepaymentModal(true)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '8px 12px',
+                    backgroundColor: '#1976d2',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontSize: '14px'
+                  }}
+                >
+                  💳 Выставить предоплату
+                </button>
               </div>
-              <div style={{ marginTop: 6, fontSize: 14, color: '#555' }}>
-                Статус: {selectedOrder.prepaymentStatus || '—'}{selectedOrder.paymentId ? ` (ID: ${selectedOrder.paymentId})` : ''}
-              </div>
+              
+              {selectedOrder.prepaymentAmount && selectedOrder.prepaymentAmount > 0 && (
+                <div style={{ 
+                  marginTop: 12, 
+                  padding: 12, 
+                  backgroundColor: '#f0f8ff', 
+                  borderRadius: 6,
+                  border: '1px solid #e3f2fd'
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <span style={{ fontWeight: 'bold', color: '#1976d2' }}>
+                      Сумма: {selectedOrder.prepaymentAmount} BYN
+                    </span>
+                    <span style={{ 
+                      fontSize: '12px', 
+                      padding: '2px 8px',
+                      backgroundColor: selectedOrder.prepaymentStatus === 'paid' ? '#4caf50' : '#ff9800',
+                      color: 'white',
+                      borderRadius: '12px'
+                    }}>
+                      {selectedOrder.prepaymentStatus === 'paid' ? 'Оплачено' : 'Ожидает оплаты'}
+                    </span>
+                  </div>
+                  
+                  {selectedOrder.paymentUrl && (
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <a 
+                        href={selectedOrder.paymentUrl} 
+                        target="_blank" 
+                        rel="noreferrer"
+                        style={{
+                          padding: '6px 12px',
+                          backgroundColor: '#4caf50',
+                          color: 'white',
+                          textDecoration: 'none',
+                          borderRadius: '4px',
+                          fontSize: '12px'
+                        }}
+                      >
+                        🔗 Перейти к оплате
+                      </a>
+                      <button 
+                        onClick={() => navigator.clipboard.writeText(selectedOrder.paymentUrl || '')}
+                        style={{
+                          padding: '6px 12px',
+                          backgroundColor: '#ff9800',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '12px'
+                        }}
+                      >
+                        📋 Копировать ссылку
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* ====== ВСТАВЛЯЕМ ИТОГОВУЮ СУММУ ====== */}
@@ -310,17 +548,42 @@ export default function App() {
                 quantity: it.quantity ?? 1,
               }))}
               discount={0}
-              taxRate={0.2}
+              taxRate={0}
             />
           </>
         ) : (
-          <p>Выберите заказ слева</p>
+          <div style={{ padding: '20px', textAlign: 'center' }}>
+            <p>Выберите заказ слева</p>
+            {selectedId && (
+              <div style={{ marginTop: '10px', color: '#666', fontSize: '14px' }}>
+                <p>Заказ с ID {selectedId} не найден в списке</p>
+                <p>Всего заказов: {orders.length}</p>
+                <button 
+                  onClick={() => setSelectedId(null)}
+                  style={{ 
+                    marginTop: '10px', 
+                    padding: '8px 16px', 
+                    backgroundColor: '#f5f5f5', 
+                    border: '1px solid #ddd', 
+                    borderRadius: '4px',
+                    cursor: 'pointer'
+                  }}
+                >
+                  Сбросить выбор
+                </button>
+              </div>
+            )}
+          </div>
         )}
       </section>
+        </>
+      )}
 
       {showAddItem && selectedOrder && (
         <AddItemModal
           order={selectedOrder}
+          allowedCategories={[ 'Листовки' ]}
+          initialCategory={'Листовки'}
           onSave={() => {
             setShowAddItem(false);
             loadOrders();
@@ -329,7 +592,7 @@ export default function App() {
         />
       )}
 
-      {showMaterials && (
+      {currentUser?.role === 'admin' && showMaterials && (
         <ManageMaterialsModal onClose={() => setShowMaterials(false)} />
       )}
 
@@ -338,6 +601,45 @@ export default function App() {
           onClose={() => setShowPresets(false)}
           onSave={() => setShowPresets(false)}
         />
+      )}
+
+      {showPrepaymentModal && selectedOrder && (
+        <PrepaymentModal
+          isOpen={showPrepaymentModal}
+          onClose={() => setShowPrepaymentModal(false)}
+          orderId={selectedOrder.id}
+          orderNumber={selectedOrder.number}
+          currentAmount={selectedOrder.prepaymentAmount}
+          onPrepaymentCreated={async (amount, email) => {
+            try {
+              const res = await createPrepaymentLink(selectedOrder.id, amount);
+              await loadOrders();
+              setPrepayAmount(String(amount));
+              alert(`Предоплата на сумму ${amount} BYN создана. Ссылка отправлена на ${email}`);
+            } catch (error) {
+              console.error('Error creating prepayment:', error);
+              const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка';
+              alert(`Не удалось создать предоплату: ${errorMessage}`);
+            }
+          }}
+        />
+      )}
+
+      {/* Админ-меню */}
+      {showAdminMenu && (
+        <AdminMenu
+          isOpen={showAdminMenu}
+          onClose={() => setShowAdminMenu(false)}
+          onNavigate={(page) => {
+            setCurrentPage(page);
+            setShowAdminMenu(false);
+          }}
+        />
+      )}
+
+      {/* Админ-страницы */}
+      {currentPage === 'reports' && currentUser?.role === 'admin' && (
+        <AdminReportsPage onBack={() => setCurrentPage('orders')} />
       )}
     </div>
   );

@@ -1,14 +1,44 @@
 {
-  "private": true,
-  "name": "crm-monorepo",
+  "name": "crm-system",
   "version": "1.0.0",
+  "description": "CRM system for print shop with order management, price calculator, and materials tracking",
+  "main": "index.js",
   "scripts": {
-    "dev:backend": "npm --prefix backend run dev",
-    "build:backend": "npm --prefix backend run build",
-    "start:backend": "npm --prefix backend run start",
-    "dev:frontend": "npm --prefix frontend run dev",
-    "build:frontend": "npm --prefix frontend run build",
-    "preview:frontend": "npm --prefix frontend run preview",
-    "build": "npm run build:backend && npm run build:frontend"
-  }
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build": "npm run build:backend && npm run build:frontend",
+    "build:backend": "cd backend && npm run build",
+    "build:frontend": "cd frontend && npm run build",
+    "start": "cd backend && npm start",
+    "test": "npm run test:backend && npm run test:frontend",
+    "test:backend": "cd backend && npm test",
+    "test:frontend": "cd frontend && npm test",
+    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
+    "setup": "npm run install:all && npm run setup:git",
+    "setup:git": "setup-git.bat"
+  },
+  "keywords": [
+    "crm",
+    "print-shop",
+    "order-management",
+    "price-calculator",
+    "materials-tracking",
+    "react",
+    "nodejs",
+    "typescript"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/username/crm-system.git"
+  },
+  "bugs": {
+    "url": "https://github.com/username/crm-system/issues"
+  },
+  "homepage": "https://github.com/username/crm-system#readme"
 }

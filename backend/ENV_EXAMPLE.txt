@@ -1,0 +1,9 @@
+# Backend configuration example
+PORT=3001
+DB_FILE=backend/data.db
+CORS_ORIGIN=*
+# SHOW_ERROR_STACK=false will hide stack in production
+SHOW_ERROR_STACK=false
+# Sentry DSN (optional)
+SENTRY_DSN=
+

@@ -1,15 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import { PresetCategory, MaterialRow, Item, Order } from '../types';
 import { addOrderItem, getProductMaterials, getPresets, getPrinters } from '../api';
+import axios from 'axios';
+import FlyersCalculatorModal from './FlyersCalculatorModal';
 import type { Printer } from '../types';
 
 interface Props {
   order: Order;
   onSave: () => void;
   onClose: () => void;
+  initialCategory?: string;
+  allowedCategories?: string[];
 }
 
-export default function AddItemModal({ order, onSave, onClose }: Props) {
+export default function AddItemModal({ order, onSave, onClose, initialCategory, allowedCategories }: Props) {
   const [presets, setPresets] = useState<PresetCategory[]>([]);
   const [category, setCategory] = useState<PresetCategory | null>(null);
   const [product, setProduct] = useState<PresetCategory['items'][0] | null>(null);
@@ -18,14 +22,28 @@ export default function AddItemModal({ order, onSave, onClose }: Props) {
   const [extras, setExtras] = useState<Record<string, number | boolean>>({});
   const [required, setRequired] = useState<MaterialRow[]>([]);
   const [ok, setOk] = useState(true);
+  const [customComponents, setCustomComponents] = useState<Array<{ materialId: number; qtyPerItem: number }>>([]);
   const [printers, setPrinters] = useState<Printer[]>([]);
   const [printerId, setPrinterId] = useState<number | ''>('');
   const [sides, setSides] = useState(1);
   const [sheets, setSheets] = useState(0);
   const [waste, setWaste] = useState(0);
+  // MVP calculator (flyers)
+  const [calcParams, setCalcParams] = useState<{ format?: 'A6'|'A5'|'A4'; sides?: 1|2; qty?: number; paperDensity?: 130|170; lamination?: 'none'|'matte'|'glossy' }>({});
+  const [calcResult, setCalcResult] = useState<{ pricePerItem?: number; totalPrice?: number; totalSheets?: number; components?: Array<{ materialId:number; qtyPerItem:number }> }>({});
+  const [showFlyersCalc, setShowFlyersCalc] = useState(false);
 
   useEffect(() => {
-    getPresets().then(r => setPresets(r.data));
+    getPresets().then(r => {
+      const list = Array.isArray(allowedCategories) && allowedCategories.length
+        ? r.data.filter(p => allowedCategories.includes(p.category))
+        : r.data
+      setPresets(list);
+      if (!category && initialCategory) {
+        const cat = list.find(p => p.category === initialCategory) || null;
+        if (cat) setCategory(cat)
+      }
+    });
     getPrinters().then(r => setPrinters(r.data));
     if (product && category) {
       getProductMaterials(category.category, product.description).then(res => {
@@ -35,48 +53,79 @@ export default function AddItemModal({ order, onSave, onClose }: Props) {
     }
   }, [product, category, quantity]);
 
-  function handleSave() {
+  async function handleSave() {
     if (!product || !category) return;
-    const params = { description: product.description };
+    // Ensure calculator applied for flyers even if user не нажал "Рассчитать"
+    let localCalc = calcResult;
+    if (category.category === 'Листовки') {
+      const guessFormat = (desc: string): 'A6'|'A5'|'A4'|undefined => {
+        if (/A6/i.test(desc)) return 'A6';
+        if (/A5/i.test(desc)) return 'A5';
+        if (/A4/i.test(desc)) return 'A4';
+        return undefined;
+      }
+      const needFormat = calcParams.format || guessFormat(product.description);
+      const needQty = calcParams.qty || quantity;
+      const needSides = calcParams.sides || sides;
+      const needDensity = calcParams.paperDensity || 130;
+      const needLam = calcParams.lamination || 'none';
+      if (needFormat && needQty && needSides) {
+        try {
+          const r = await axios.post('/api/calculators/flyers-color/price', {
+            format: needFormat, qty: needQty, sides: needSides, paperDensity: needDensity, lamination: needLam
+          })
+          localCalc = r.data
+          setCalcResult(r.data)
+        } catch {}
+      }
+    }
+    const params = { description: product.description } as any;
     const item: Omit<Item, 'id'> = {
       type: category.category,
       params,
-      price: price || product.price,
-      quantity,
+      price: (localCalc.pricePerItem ?? price) || product.price,
+      quantity: calcParams.qty ?? quantity,
       printerId: printerId ? Number(printerId) : undefined,
-      sides,
+      sides: calcParams.sides ?? sides,
       sheets,
       waste
     };
-    addOrderItem(order.id, item).then(onSave);
+    const payload: any = { ...item };
+    if (localCalc.components && localCalc.components.length > 0) payload.components = localCalc.components;
+    else if (customComponents.length > 0) payload.components = customComponents;
+    addOrderItem(order.id, payload).then(onSave);
   }
 
   return (
     <div className="modal">
       <h3>Добавить позицию</h3>
-      <div>
-        <select onChange={e => {
-          const cat = presets.find(p => p.category === e.target.value)!;
-          setCategory(cat);
-          setProduct(null);
-          setPrice(0);
-        }}>
-          <option value="">Выберите категорию</option>
-          {presets.map(p => (
-            <option key={p.category} value={p.category}>{p.category}</option>
-          ))}
-        </select>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        <button
+          onClick={() => setShowFlyersCalc(true)}
+          style={{ padding: '10px 14px', borderRadius: 8, border: '1px solid #e5e7eb', background: '#fff', fontWeight: 600 }}
+        >Листовки</button>
+        {/* другие продукты добавим позже кнопками здесь */}
       </div>
 
-      {category && (
+      <div style={{ marginTop: 10 }}>
+        <button onClick={onClose}>Закрыть</button>
+      </div>
+
+      {showFlyersCalc && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(2px)', display: 'grid', placeItems: 'center', zIndex: 50 }}>
+          <FlyersCalculatorModal order={order} onSave={onSave} onClose={() => setShowFlyersCalc(false)} />
+        </div>
+      )}
+
+      {false && !!category && (
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <select onChange={e => {
-            const prod = category.items.find(i => i.description === e.target.value)!;
+            const prod = (category?.items || []).find(i => i.description === e.target.value)!;
             setProduct(prod);
             setPrice(prod.price);
           }}>
             <option value="">Выберите продукт</option>
-            {category.items.map(i => (
+            {(category?.items || []).map(i => (
               <option key={i.description} value={i.description}>
                 {i.description} ({i.price})
               </option>
@@ -91,9 +140,62 @@ export default function AddItemModal({ order, onSave, onClose }: Props) {
         </div>
       )}
 
-      {product && (
+      {false && !!product && (
         <div>
-          <p>Базовая цена: {product.price}</p>
+          {/* MVP калькулятор для Листовок */}
+          {Boolean(category) && (category as any).category === 'Листовки' && (
+            <div className="order-total" style={{ marginTop: 8 }}>
+              <strong>Калькулятор (MVP)</strong>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginTop: 8 }}>
+                <label>Формат
+                  <select value={calcParams.format || ''} onChange={e => setCalcParams(p => ({ ...p, format: (e.target.value as any) || undefined }))}>
+                    <option value="">—</option>
+                    <option value="A6">A6</option>
+                    <option value="A5">A5</option>
+                    <option value="A4">A4</option>
+                  </select>
+                </label>
+                <label>Стороны
+                  <select value={calcParams.sides || 1} onChange={e => setCalcParams(p => ({ ...p, sides: Number(e.target.value) as any }))}>
+                    <option value={1}>1</option>
+                    <option value={2}>2</option>
+                  </select>
+                </label>
+                <label>Тираж
+                  <input type="number" value={calcParams.qty || ''} onChange={e => setCalcParams(p => ({ ...p, qty: Number(e.target.value) || undefined }))} />
+                </label>
+                <label>Плотность
+                  <select value={calcParams.paperDensity || 130} onChange={e => setCalcParams(p => ({ ...p, paperDensity: Number(e.target.value) as any }))}>
+                    <option value={130}>130</option>
+                    <option value={170}>170</option>
+                  </select>
+                </label>
+                <label>Ламинация
+                  <select value={calcParams.lamination || 'none'} onChange={e => setCalcParams(p => ({ ...p, lamination: (e.target.value as any) }))}>
+                    <option value="none">Нет</option>
+                    <option value="matte">Матовая</option>
+                    <option value="glossy">Глянцевая</option>
+                  </select>
+                </label>
+                <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+                  <button onClick={async () => {
+                    if (!calcParams.format || !calcParams.qty || !calcParams.sides) { alert('Заполните формат/тираж/стороны'); return }
+                  const r = await axios.post('/api/calculators/flyers-color/price', calcParams)
+                    setCalcResult(r.data)
+                    setPrice(r.data?.pricePerItem || price)
+                  }}>Рассчитать</button>
+                </div>
+              </div>
+              {calcResult && (calcResult as any).totalPrice != null && (
+                <div style={{ marginTop: 8, fontSize: 14 }}>
+                  <div>Цена за штуку: <strong>{(calcResult as any).pricePerItem} BYN</strong></div>
+                  <div>Итого: <strong>{(calcResult as any).totalPrice} BYN</strong></div>
+                  <div>SRA3 листов: {(calcResult as any).totalSheets}</div>
+                </div>
+              )}
+            </div>
+          )}
+          <p>Базовая цена: {product?.price}</p>
           <p>
             Своя цена:{' '}
             <input
@@ -141,7 +243,7 @@ export default function AddItemModal({ order, onSave, onClose }: Props) {
         </div>
       )}
 
-      {required.length > 0 && (
+      {false && required.length > 0 && (
         <div style={{ color: ok ? 'green' : 'red' }}>
           {required.map(r => (
             <div key={r.materialId}>
@@ -151,9 +253,43 @@ export default function AddItemModal({ order, onSave, onClose }: Props) {
         </div>
       )}
 
-      <button onClick={onClose}>Отмена</button>
-      <button onClick={handleSave} disabled={!product || !ok}>Сохранить</button>
-      {!ok && <div style={{ color: 'red', marginTop: 8 }}>Недостаточно материалов с учётом минимального остатка</div>}
+      {/* Простейший пользовательский калькулятор состава (опционально) */}
+      {false && !!product && (
+        <div style={{ marginTop: 8 }}>
+          <details>
+            <summary>Дополнительно: задать состав вручную</summary>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <input type="number" placeholder="ID материала" onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  const id = Number((e.target as HTMLInputElement).value);
+                  if (id) setCustomComponents(arr => [...arr, { materialId: id, qtyPerItem: 1 }]);
+                  (e.target as HTMLInputElement).value = '';
+                }
+              }} />
+              <button onClick={() => setCustomComponents([])}>Очистить</button>
+            </div>
+            {customComponents.length > 0 && (
+              <div style={{ marginTop: 6, fontSize: 12 }}>
+                {customComponents.map((c, idx) => (
+                  <div key={idx} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <span>Материал #{c.materialId}</span>
+                    <input type="number" value={c.qtyPerItem} min={0} step={0.01} onChange={e => setCustomComponents(list => list.map((v,i) => i===idx ? { ...v, qtyPerItem: Number(e.target.value) } : v))} />
+                    <button className="btn-danger" onClick={() => setCustomComponents(list => list.filter((_,i) => i!==idx))}>Удалить</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </details>
+        </div>
+      )}
+
+      {false && (
+        <>
+          <button onClick={onClose}>Отмена</button>
+          <button onClick={handleSave} disabled={!product || !ok}>Сохранить</button>
+          {!ok && <div style={{ color: 'red', marginTop: 8 }}>Недостаточно материалов с учётом минимального остатка</div>}
+        </>
+      )}
     </div>
   );
 }

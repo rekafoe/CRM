@@ -49,6 +49,7 @@ export interface DailyReport {
   created_at: string;     // ISO timestamp
   updated_at?: string;
   user_id?: number;
+  cash_actual?: number;
 }
 
 export interface OrderFile {

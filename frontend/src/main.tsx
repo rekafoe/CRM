@@ -6,10 +6,19 @@ import App from './app';
 import { DailyReportPage } from './pages/DailyReportPage';
 import LoginPage from './pages/LoginPage';
 import './index.css';
+import { APP_CONFIG } from './types';
 
 function RequireAuth({ children }: { children: JSX.Element }) {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('crmToken') : null;
+  const token = typeof window !== 'undefined' ? localStorage.getItem(APP_CONFIG.storage.token) : null;
+  const sessDate = typeof window !== 'undefined' ? localStorage.getItem(APP_CONFIG.storage.sessionDate) : null;
+  const today = new Date().toISOString().slice(0,10);
   if (!token) return <Navigate to="/login" replace />;
+  if (sessDate && sessDate !== today) {
+    // Session expired by date turnover, force re-auth
+    localStorage.removeItem(APP_CONFIG.storage.token);
+    localStorage.removeItem(APP_CONFIG.storage.role);
+    return <Navigate to="/login" replace />;
+  }
   return children;
 }
 

@@ -1,7 +1,7 @@
 export interface Item {
   id: number;
   type: string;
-  params: { description: string };
+  params: { description: string; paperDensity?: number; paperName?: string; lamination?: 'none'|'matte'|'glossy' };
   price: number;
   quantity?: number;
   printerId?: number;
@@ -16,6 +16,7 @@ export interface Order {
   number: string;
   status: number;
   createdAt: string;
+  userId?: number;
   // Optional customer and prepayment fields synced with backend
   customerName?: string;
   customerPhone?: string;
@@ -51,6 +52,8 @@ export interface Material {
   name: string;
   unit: string;
   quantity: number;
+  min_quantity?: number;
+  sheet_price_single?: number | null;
 }
 
 export interface MaterialRow {
@@ -70,6 +73,18 @@ export interface DailyReport {
   updated_at?: string;
   user_id?: number;
   user_name?: string | null;
+  cash_actual?: number;
+  // Полная информация о заказах в отчёте
+  orders?: Order[];
+  // Метаданные отчёта
+  report_metadata?: {
+    total_orders: number;
+    total_revenue: number;
+    orders_by_status: Record<number, number>;
+    revenue_by_status: Record<number, number>;
+    created_by: number;
+    last_modified: string;
+  };
 }
 
 export interface UserRef { id: number; name: string }
@@ -88,3 +103,14 @@ export interface OrderFile {
 }
 
 export interface Printer { id: number; code: string; name: string }
+
+// App-level configuration constants
+export const APP_CONFIG = {
+  storage: {
+    token: 'crmToken',
+    role: 'crmRole',
+    sessionDate: 'crmSessionDate',
+    userId: 'crmUserId'
+  },
+  apiBase: '/api'
+} as const

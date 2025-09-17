@@ -5,6 +5,17 @@ import cors from 'cors'
 import { initDB } from './db'
 import { Order, Item, Material, ProductMaterial, DailyReport } from './types'
 import 'dotenv/config';
+// Optional: Sentry setup
+const SENTRY_DSN = process.env.SENTRY_DSN
+if (SENTRY_DSN) {
+  try {
+    // Lazy import to avoid dependency if not configured
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const Sentry = require('@sentry/node')
+    Sentry.init({ dsn: SENTRY_DSN })
+    console.log(JSON.stringify({ level: 'info', msg: 'Sentry initialized' }))
+  } catch {}
+}
 import { createHash } from 'crypto'
 import path from 'path'
 import fs from 'fs'
@@ -15,7 +26,8 @@ async function main() {
   const db = await initDB()
   const app = express()
 
-  app.use(cors())
+  const ALLOWED_ORIGIN = process.env.CORS_ORIGIN || '*'
+  app.use(cors({ origin: ALLOWED_ORIGIN }))
   app.use(express.json())
   // Files storage
   const uploadsDir = path.resolve(__dirname, '../uploads')
@@ -36,20 +48,29 @@ async function main() {
     const { email, password } = req.body as { email: string; password: string }
     if (!email || !password) return res.status(400).json({ message: 'Email и пароль обязательны' })
     const hp = createHash('sha256').update(password).digest('hex')
-    const u = await db.get<{ api_token: string; name: string; role: string }>(
-      'SELECT api_token, name, role FROM users WHERE email = ? AND password_hash = ?',
+    const u = await db.get<{ id: number; api_token: string; name: string; role: string }>(
+      'SELECT id, api_token, name, role FROM users WHERE email = ? AND password_hash = ?',
       email,
       hp
     )
     if (!u) return res.status(401).json({ message: 'Неверные данные' })
-    res.json({ token: u.api_token, name: u.name, role: u.role })
+
+    // Ensure daily report exists for today for this user
+    const today = new Date().toISOString().slice(0,10)
+    const exists = await db.get('SELECT id FROM daily_reports WHERE report_date = ? AND user_id = ?', today, u.id)
+    if (!exists) {
+      try {
+        await db.run('INSERT INTO daily_reports (report_date, user_id) VALUES (?, ?)', today, u.id)
+      } catch {}
+    }
+
+    res.json({ token: u.api_token, name: u.name, role: u.role, user_id: u.id, session_date: today })
   })
   // Simple token auth middleware (API token from users.api_token)
   app.use(async (req: Request, res: Response, next: NextFunction) => {
     const openPaths = [
       // public widget needs these
       /^\/api\/presets/,
-      /^\/api\/orders$/,
       /^\/api\/orders\/[0-9]+\/items$/,
       /^\/api\/orders\/[0-9]+\/prepay$/,
       /^\/api\/webhooks\/bepaid$/
@@ -73,11 +94,19 @@ async function main() {
   // GET /api/orders — список заказов с их позициями
   app.get(
     '/api/orders',
-    asyncHandler(async (_req, res) => {
-      const orders = (await db.all<Order>(
-        'SELECT id, number, status, createdAt FROM orders ORDER BY id DESC'
-      )) as unknown as Order[]
-      for (const o of orders) {
+    asyncHandler(async (req, res) => {
+      try {
+        const authUser = (req as any).user as { id: number; role: string } | undefined
+        if (!authUser?.id) { res.status(401).json({ message: 'Unauthorized' }); return }
+        const orders = (await db.all<Order>(
+          'SELECT id, number, status, createdAt, customerName, customerPhone, customerEmail, prepaymentAmount, prepaymentStatus, paymentUrl, paymentId, userId FROM orders WHERE userId = ? OR userId IS NULL ORDER BY id DESC',
+          authUser.id
+        )) as unknown as Order[]
+        
+        console.log(`Found ${orders.length} orders in database`);
+        
+        for (const o of orders) {
+          console.log(`Processing order ${o.number} (ID: ${o.id})`);
         const itemsRaw = (await db.all<{
           id: number
           orderId: number
@@ -100,21 +129,35 @@ async function main() {
           waste: number
           clicks: number
         }>
-        o.items = itemsRaw.map(ir => ({
-          id: ir.id,
-          orderId: ir.orderId,
-          type: ir.type,
-          params: JSON.parse(ir.params),
-          price: ir.price,
-          quantity: ir.quantity ?? 1,
-          printerId: ir.printerId ?? undefined,
-          sides: ir.sides,
-          sheets: ir.sheets,
-          waste: ir.waste,
-          clicks: ir.clicks
-        }))
+        o.items = itemsRaw.map(ir => {
+          let params;
+          try {
+            params = JSON.parse(ir.params);
+          } catch (error) {
+            console.error(`Error parsing params for item ${ir.id}:`, error);
+            params = { description: 'Ошибка данных' };
+          }
+          return {
+            id: ir.id,
+            orderId: ir.orderId,
+            type: ir.type,
+            params,
+            price: ir.price,
+            quantity: ir.quantity ?? 1,
+            printerId: ir.printerId ?? undefined,
+            sides: ir.sides,
+            sheets: ir.sheets,
+            waste: ir.waste,
+            clicks: ir.clicks
+          };
+        })
+        }
+        console.log(`Successfully processed ${orders.length} orders`);
+        res.json(orders)
+      } catch (error) {
+        console.error('Error in /api/orders:', error);
+        res.status(500).json({ error: 'Failed to load orders', details: error instanceof Error ? error.message : String(error) });
       }
-      res.json(orders)
     })
   )
 
@@ -123,15 +166,17 @@ async function main() {
     '/api/orders',
     asyncHandler(async (req, res) => {
       const createdAt = new Date().toISOString()
+      const authUser = (req as any).user as { id: number } | undefined
       const { customerName, customerPhone, customerEmail, prepaymentAmount } = (req.body || {}) as Partial<Order>
       const insertRes = await db.run(
-        'INSERT INTO orders (status, createdAt, customerName, customerPhone, customerEmail, prepaymentAmount) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO orders (status, createdAt, customerName, customerPhone, customerEmail, prepaymentAmount, userId) VALUES (?, ?, ?, ?, ?, ?, ?)',
         1,
         createdAt,
         customerName || null,
         customerPhone || null,
         customerEmail || null,
-        Number(prepaymentAmount || 0)
+        Number(prepaymentAmount || 0),
+        authUser?.id ?? null
       )
       const id = insertRes.lastID!
       const number = `ORD-${String(id).padStart(4, '0')}`
@@ -197,7 +242,7 @@ async function main() {
     '/api/orders/:id/items',
     asyncHandler(async (req, res) => {
       const orderId = Number(req.params.id)
-      const { type, params, price, quantity = 1, printerId, sides = 1, sheets = 0, waste = 0 } = req.body as {
+      const { type, params, price, quantity = 1, printerId, sides = 1, sheets = 0, waste = 0, components } = req.body as {
         type: string
         params: { description: string }
         price: number
@@ -206,28 +251,36 @@ async function main() {
         sides?: number
         sheets?: number
         waste?: number
+        components?: Array<{ materialId: number; qtyPerItem: number }>
       }
       const authUser = (req as any).user as { id: number } | undefined
 
-      // Узнаём материалы и остатки
-      const needed = (await db.all<{
-        materialId: number
-        qtyPerItem: number
-        quantity: number
-        min_quantity: number | null
-      }>(
-        `SELECT pm.materialId, pm.qtyPerItem, m.quantity, m.min_quantity as min_quantity
-           FROM product_materials pm
-           JOIN materials m ON m.id = pm.materialId
-           WHERE pm.presetCategory = ? AND pm.presetDescription = ?`,
-        type,
-        params.description
-      )) as unknown as Array<{
-        materialId: number
-        qtyPerItem: number
-        quantity: number
-        min_quantity: number | null
-      }>
+      // Узнаём материалы и остатки (либо из переданных components, либо по пресету)
+      let needed = [] as Array<{ materialId: number; qtyPerItem: number; quantity: number; min_quantity: number | null }>
+      if (Array.isArray(components) && components.length > 0) {
+        const ids = components.map(c => Number(c.materialId)).filter(Boolean)
+        if (ids.length) {
+          const placeholders = ids.map(() => '?').join(',')
+          const rows = await db.all<any>(`SELECT id as materialId, quantity, min_quantity FROM materials WHERE id IN (${placeholders})`, ...ids)
+          const byId: Record<number, { quantity: number; min_quantity: number | null }> = {}
+          for (const r of rows) byId[Number(r.materialId)] = { quantity: Number(r.quantity), min_quantity: r.min_quantity == null ? null : Number(r.min_quantity) }
+          needed = components.map(c => ({ materialId: Number(c.materialId), qtyPerItem: Number(c.qtyPerItem), quantity: byId[Number(c.materialId)]?.quantity ?? 0, min_quantity: byId[Number(c.materialId)]?.min_quantity ?? null }))
+        }
+      } else {
+        needed = (await db.all<{
+          materialId: number
+          qtyPerItem: number
+          quantity: number
+          min_quantity: number | null
+        }>(
+          `SELECT pm.materialId, pm.qtyPerItem, m.quantity, m.min_quantity as min_quantity
+             FROM product_materials pm
+             JOIN materials m ON m.id = pm.materialId
+             WHERE pm.presetCategory = ? AND pm.presetDescription = ?`,
+          type,
+          params.description
+        )) as unknown as Array<{ materialId: number; qtyPerItem: number; quantity: number; min_quantity: number | null }>
+      }
 
       // Транзакция: проверка остатков, списание и вставка позиции
       await db.run('BEGIN')
@@ -260,7 +313,7 @@ async function main() {
           'INSERT INTO items (orderId, type, params, price, quantity, printerId, sides, sheets, waste, clicks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           orderId,
           type,
-          JSON.stringify(params),
+          JSON.stringify({ ...params, components: Array.isArray(components) ? components : undefined }),
           price,
           Math.max(1, Number(quantity) || 1),
           printerId || null,
@@ -315,15 +368,31 @@ async function main() {
   app.get(
     '/api/daily-reports',
     asyncHandler(async (req, res) => {
-      const { user_id, from, to } = req.query as any
+      const authUser = (req as any).user as { id: number; role: string } | undefined
+      const { user_id, from, to, current_user_id } = req.query as any
       const params: any[] = []
       const where: string[] = []
-      if (user_id) { where.push('dr.user_id = ?'); params.push(Number(user_id)) }
+      
+      // Если указан конкретный пользователь, показываем только его отчёты (только для админа)
+      if (user_id) {
+        if (!authUser || authUser.role !== 'admin') { res.status(403).json({ message: 'Forbidden' }); return }
+        where.push('dr.user_id = ?')
+        params.push(Number(user_id))
+      } else if (current_user_id) {
+        // Если не указан user_id, но есть current_user_id, показываем отчёты текущего пользователя
+        where.push('dr.user_id = ?')
+        params.push(Number(current_user_id))
+      } else if (authUser) {
+        // По умолчанию — только свои
+        where.push('dr.user_id = ?')
+        params.push(authUser.id)
+      }
+      
       if (from) { where.push('dr.report_date >= ?'); params.push(String(from)) }
       if (to) { where.push('dr.report_date <= ?'); params.push(String(to)) }
       const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : ''
       const rows = (await db.all<DailyReport & { user_name: string | null }>(
-        `SELECT dr.id, dr.report_date, dr.orders_count, dr.total_revenue, dr.created_at, dr.updated_at, dr.user_id,
+        `SELECT dr.id, dr.report_date, dr.orders_count, dr.total_revenue, dr.created_at, dr.updated_at, dr.user_id, dr.cash_actual,
                 u.name as user_name
            FROM daily_reports dr
            LEFT JOIN users u ON u.id = dr.user_id
@@ -338,13 +407,24 @@ async function main() {
   app.get(
     '/api/daily/:date',
     asyncHandler(async (req, res) => {
+      const authUser = (req as any).user as { id: number; role: string } | undefined
+      const qUserIdRaw = (req.query as any)?.user_id
+      const targetUserId = qUserIdRaw != null && qUserIdRaw !== '' ? Number(qUserIdRaw) : authUser?.id
+      if (!targetUserId) { res.status(400).json({ message: 'Не указан пользователь' }); return }
+
+      // Access control: only admin can read others' reports
+      if (qUserIdRaw != null && targetUserId !== authUser?.id && authUser?.role !== 'admin') {
+        res.status(403).json({ message: 'Forbidden' }); return
+      }
+
       const row = await db.get<DailyReport & { user_name: string | null }>(
-        `SELECT dr.id, dr.report_date, dr.orders_count, dr.total_revenue, dr.created_at, dr.updated_at, dr.user_id,
+        `SELECT dr.id, dr.report_date, dr.orders_count, dr.total_revenue, dr.created_at, dr.updated_at, dr.user_id, dr.snapshot_json, dr.cash_actual,
                 u.name as user_name
            FROM daily_reports dr
            LEFT JOIN users u ON u.id = dr.user_id
-          WHERE dr.report_date = ?`,
-        req.params.date
+          WHERE dr.report_date = ? AND dr.user_id = ?`,
+        req.params.date,
+        targetUserId
       )
       if (!row) {
         res.status(404).json({ message: 'Отчёт не найден' })
@@ -357,44 +437,69 @@ async function main() {
   app.patch(
     '/api/daily/:date',
     asyncHandler(async (req, res) => {
-      const { orders_count, total_revenue, user_id } = req.body as {
+      const authUser = (req as any).user as { id: number; role: string } | undefined
+      const { orders_count, total_revenue, user_id, cash_actual } = req.body as {
         orders_count?: number
         total_revenue?: number
         user_id?: number
+        cash_actual?: number
       }
       if (orders_count == null && total_revenue == null && user_id == null) {
         res.status(400).json({ message: 'Нет данных для обновления' })
         return
       }
+
+      // Determine target row by (date, user)
+      const qUserIdRaw = (req.query as any)?.user_id
+      const targetUserId = qUserIdRaw != null && qUserIdRaw !== '' ? Number(qUserIdRaw) : authUser?.id
+      if (!targetUserId) { res.status(400).json({ message: 'Не указан пользователь' }); return }
+      if (qUserIdRaw != null && targetUserId !== authUser?.id && authUser?.role !== 'admin') {
+        res.status(403).json({ message: 'Forbidden' }); return
+      }
+
       const existing = await db.get<DailyReport>(
-        'SELECT id FROM daily_reports WHERE report_date = ?',
-        req.params.date
+        'SELECT id, user_id FROM daily_reports WHERE report_date = ? AND user_id = ?',
+        req.params.date,
+        targetUserId
       )
       if (!existing) {
         res.status(404).json({ message: 'Отчёт не найден' })
         return
       }
 
-      await db.run(
-        `UPDATE daily_reports
-           SET 
-             ${orders_count != null ? 'orders_count = ?,' : ''}
-             ${total_revenue != null ? 'total_revenue = ?,' : ''}
-             ${user_id != null ? 'user_id = ?,' : ''}
-             updated_at = datetime('now')
-         WHERE report_date = ?`,
-        ...([orders_count != null ? orders_count : []] as any),
-        ...([total_revenue != null ? total_revenue : []] as any),
-        ...([user_id != null ? user_id : []] as any),
-        req.params.date
-      )
+      // Allow changing owner only for admin
+      const nextUserId = user_id != null && authUser?.role === 'admin' ? user_id : targetUserId
+
+      try {
+        await db.run(
+          `UPDATE daily_reports
+             SET 
+               ${orders_count != null ? 'orders_count = ?,' : ''}
+               ${total_revenue != null ? 'total_revenue = ?,' : ''}
+               ${cash_actual != null ? 'cash_actual = ?,' : ''}
+               ${nextUserId !== targetUserId ? 'user_id = ?,' : ''}
+               updated_at = datetime('now')
+           WHERE report_date = ? AND user_id = ?`,
+          ...([orders_count != null ? orders_count : []] as any),
+          ...([total_revenue != null ? total_revenue : []] as any),
+          ...([cash_actual != null ? Number(cash_actual) : []] as any),
+          ...([nextUserId !== targetUserId ? nextUserId : []] as any),
+          req.params.date,
+          targetUserId
+        )
+      } catch (e: any) {
+        if (String(e?.message || '').includes('UNIQUE')) { res.status(409).json({ message: 'Отчёт для этого пользователя и даты уже существует' }); return }
+        throw e
+      }
+
       const updated = await db.get<DailyReport & { user_name: string | null }>(
-        `SELECT dr.id, dr.report_date, dr.orders_count, dr.total_revenue, dr.created_at, dr.updated_at, dr.user_id,
+        `SELECT dr.id, dr.report_date, dr.orders_count, dr.total_revenue, dr.created_at, dr.updated_at, dr.user_id, dr.snapshot_json, dr.cash_actual,
                 u.name as user_name
            FROM daily_reports dr
            LEFT JOIN users u ON u.id = dr.user_id
-          WHERE dr.report_date = ?`,
-        req.params.date
+          WHERE dr.report_date = ? AND dr.user_id = ?`,
+        req.params.date,
+        nextUserId
       )
       res.json(updated)
     })
@@ -404,29 +509,37 @@ async function main() {
   app.post(
     '/api/daily',
     asyncHandler(async (req, res) => {
-      const { report_date, user_id, orders_count = 0, total_revenue = 0 } = req.body as {
-        report_date: string; user_id?: number; orders_count?: number; total_revenue?: number
+      const authUser = (req as any).user as { id: number; role: string } | undefined
+      const { report_date, user_id, orders_count = 0, total_revenue = 0, cash_actual } = req.body as {
+        report_date: string; user_id?: number; orders_count?: number; total_revenue?: number; cash_actual?: number
       }
       if (!report_date) { res.status(400).json({ message: 'Нужна дата YYYY-MM-DD' }); return }
+      const today = new Date().toISOString().slice(0,10)
+      if (report_date !== today) { res.status(400).json({ message: 'Создание отчёта возможно только за сегодняшнюю дату' }); return }
+      const targetUserId = user_id != null ? Number(user_id) : authUser?.id
+      if (!targetUserId) { res.status(400).json({ message: 'Не указан пользователь' }); return }
+      if (!authUser || targetUserId !== authUser.id) { res.status(403).json({ message: 'Создание отчёта возможно только для текущего пользователя' }); return }
       try {
         await db.run(
-          'INSERT INTO daily_reports (report_date, orders_count, total_revenue, user_id) VALUES (?, ?, ?, ?)',
+          'INSERT INTO daily_reports (report_date, orders_count, total_revenue, user_id, cash_actual) VALUES (?, ?, ?, ?, ?)',
           report_date,
           orders_count,
           total_revenue,
-          user_id ?? null
+          targetUserId,
+          cash_actual != null ? Number(cash_actual) : null
         )
       } catch (e: any) {
         if (String(e?.message || '').includes('UNIQUE')) { res.status(409).json({ message: 'Отчёт уже существует' }); return }
         throw e
       }
       const row = await db.get<DailyReport & { user_name: string | null }>(
-        `SELECT dr.id, dr.report_date, dr.orders_count, dr.total_revenue, dr.created_at, dr.updated_at, dr.user_id,
+        `SELECT dr.id, dr.report_date, dr.orders_count, dr.total_revenue, dr.created_at, dr.updated_at, dr.user_id, dr.snapshot_json,
                 u.name as user_name
            FROM daily_reports dr
            LEFT JOIN users u ON u.id = dr.user_id
-          WHERE dr.report_date = ?`,
-        report_date
+          WHERE dr.report_date = ? AND dr.user_id = ?`,
+        report_date,
+        targetUserId
       )
       res.status(201).json(row)
     })
@@ -438,6 +551,224 @@ async function main() {
     asyncHandler(async (_req, res) => {
       const users = await db.all<{ id: number; name: string }>('SELECT id, name FROM users ORDER BY name')
       res.json(users)
+    })
+  )
+
+  // GET /api/me — информация о текущем пользователе
+  app.get(
+    '/api/me',
+    asyncHandler(async (req, res) => {
+      const token = req.headers.authorization?.replace('Bearer ', '')
+      if (!token) {
+        res.status(401).json({ message: 'Токен не предоставлен' })
+        return
+      }
+      
+      const user = await db.get<{ id: number; name: string; role: string }>(
+        'SELECT id, name, role FROM users WHERE api_token = ?',
+        token
+      )
+      
+      if (!user) {
+        res.status(401).json({ message: 'Неверный токен' })
+        return
+      }
+      
+      res.json(user)
+    })
+  )
+
+  // DELETE /api/daily-reports/:id — удалить отчёт
+  app.delete(
+    '/api/daily-reports/:id',
+    asyncHandler(async (req, res) => {
+      const reportId = Number(req.params.id)
+      if (!reportId) {
+        res.status(400).json({ message: 'Неверный ID отчёта' })
+        return
+      }
+
+      // Проверяем, существует ли отчёт
+      const report = await db.get('SELECT id FROM daily_reports WHERE id = ?', reportId)
+      if (!report) {
+        res.status(404).json({ message: 'Отчёт не найден' })
+        return
+      }
+
+      await db.run('DELETE FROM daily_reports WHERE id = ?', reportId)
+      res.json({ message: 'Отчёт успешно удалён' })
+    })
+  )
+
+  // GET /api/daily-reports/full/:date — получить полный отчёт с заказами
+  app.get(
+    '/api/daily-reports/full/:date',
+    asyncHandler(async (req, res) => {
+      const reportDate = req.params.date
+      const authUser = (req as any).user as { id: number; role: string } | undefined
+      const userId = req.query.user_id ? Number(req.query.user_id) : authUser?.id
+      if (!userId) { res.status(400).json({ message: 'Не указан пользователь' }); return }
+      if ((req.query.user_id as any) && userId !== authUser?.id && authUser?.role !== 'admin') { res.status(403).json({ message: 'Forbidden' }); return }
+
+      // Получаем отчёт
+      const report = await db.get<DailyReport & { user_name: string | null }>(
+        `SELECT dr.id, dr.report_date, dr.orders_count, dr.total_revenue, dr.created_at, dr.updated_at, dr.user_id, dr.snapshot_json,
+                u.name as user_name
+           FROM daily_reports dr
+           LEFT JOIN users u ON u.id = dr.user_id
+           WHERE dr.report_date = ? AND dr.user_id = ?`,
+        [reportDate, userId]
+      )
+
+      if (!report) {
+        res.status(404).json({ message: 'Отчёт не найден' })
+        return
+      }
+
+      // Получаем заказы за эту дату (на текущий момент не фильтруем по пользователю, так как связь не хранится в orders)
+      const orders = await db.all<any>(
+        `SELECT id, number, status, createdAt, customerName, customerPhone, customerEmail, 
+                prepaymentAmount, prepaymentStatus, paymentUrl, paymentId, userId
+           FROM orders 
+           WHERE DATE(createdAt) = ? AND userId = ?
+           ORDER BY createdAt DESC`,
+        [reportDate, userId]
+      ) as Order[]
+
+      // Получаем позиции для каждого заказа
+      for (const order of orders) {
+        const items = await db.all<any>(
+          `SELECT id, orderId, type, params, price, quantity, printerId, sides, sheets, waste, clicks
+           FROM items WHERE orderId = ?`,
+          order.id
+        ) as Item[]
+        order.items = items.map((item: any) => ({
+          ...item,
+          params: typeof item.params === 'string' ? JSON.parse(item.params) : item.params
+        }))
+      }
+
+      // Создаём метаданные отчёта
+      const ordersByStatus: Record<number, number> = {}
+      const revenueByStatus: Record<number, number> = {}
+      
+      orders.forEach((order: any) => {
+        ordersByStatus[order.status] = (ordersByStatus[order.status] || 0) + 1
+        const orderRevenue = order.items.reduce((sum: any, item: any) => sum + (item.price * (item.quantity || 1)), 0)
+        revenueByStatus[order.status] = (revenueByStatus[order.status] || 0) + orderRevenue
+      })
+
+      const fullReport: any = {
+        ...report,
+        orders,
+        report_metadata: {
+          total_orders: orders.length,
+          total_revenue: orders.reduce((sum: any, order: any) => 
+            sum + order.items.reduce((itemSum: any, item: any) => itemSum + (item.price * (item.quantity || 1)), 0), 0
+          ),
+          orders_by_status: ordersByStatus,
+          revenue_by_status: revenueByStatus,
+          created_by: report.user_id || 0,
+          last_modified: new Date().toISOString()
+        }
+      }
+
+      res.json(fullReport)
+    })
+  )
+
+  // POST /api/daily-reports/full — сохранить полный отчёт
+  app.post(
+    '/api/daily-reports/full',
+    asyncHandler(async (req, res) => {
+      const authUser = (req as any).user as { id: number; role: string } | undefined
+      const reportData = req.body as any
+      const { report_date, user_id, orders, report_metadata } = reportData
+
+      if (!report_date) { res.status(400).json({ message: 'Дата отчёта обязательна' }); return }
+      const targetUserId = user_id || authUser?.id
+      if (!targetUserId) { res.status(400).json({ message: 'Не указан пользователь' }); return }
+      if (user_id && targetUserId !== authUser?.id && authUser?.role !== 'admin') { res.status(403).json({ message: 'Forbidden' }); return }
+
+      // Создаём или обновляем отчёт
+      const existingReport = await db.get('SELECT id FROM daily_reports WHERE report_date = ? AND user_id = ?', 
+        report_date, targetUserId)
+
+      if (!existingReport) { res.status(404).json({ message: 'Отчёт не найден. Создание возможно только через вход в систему в день отчёта.' }); return }
+      // Обновляем существующий отчёт
+      await db.run(
+        'UPDATE daily_reports SET orders_count = ?, total_revenue = ?, snapshot_json = ?, updated_at = ? WHERE id = ?',
+        report_metadata?.total_orders || 0,
+        report_metadata?.total_revenue || 0,
+        JSON.stringify({ orders }),
+        new Date().toISOString(),
+        existingReport.id
+      )
+
+      res.status(201).json({ message: 'Полный отчёт сохранён' })
+    })
+  )
+
+  // POST /api/orders/:id/duplicate — дублировать заказ
+  app.post(
+    '/api/orders/:id/duplicate',
+    asyncHandler(async (req, res) => {
+      const originalOrderId = Number(req.params.id)
+      const originalOrder = await db.get<Order>('SELECT * FROM orders WHERE id = ?', originalOrderId)
+      
+      if (!originalOrder) {
+        res.status(404).json({ message: 'Заказ не найден' })
+        return
+      }
+
+      // Создаём новый заказ
+      const newOrderNumber = `${originalOrder.number}-COPY-${Date.now()}`
+      const createdAt = new Date().toISOString()
+      
+      const newOrderResult = await db.run(
+        'INSERT INTO orders (number, status, createdAt, customerName, customerPhone, customerEmail, prepaymentAmount, prepaymentStatus) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        newOrderNumber,
+        1, // Новый статус
+        createdAt,
+        originalOrder.customerName,
+        originalOrder.customerPhone,
+        originalOrder.customerEmail,
+        null, // Сбрасываем предоплату
+        null
+      )
+
+      const newOrderId = newOrderResult.lastID
+
+      // Копируем позиции
+      const originalItems = await db.all<any>('SELECT * FROM items WHERE orderId = ?', originalOrderId)
+      for (const item of originalItems) {
+        await db.run(
+          'INSERT INTO items (orderId, type, params, price, quantity, printerId, sides, sheets, waste, clicks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          newOrderId,
+          item.type,
+          typeof item.params === 'string' ? item.params : JSON.stringify(item.params),
+          item.price,
+          item.quantity,
+          item.printerId,
+          item.sides,
+          item.sheets,
+          item.waste,
+          item.clicks
+        )
+      }
+
+      // Получаем созданный заказ с позициями
+      const newOrder = await db.get<any>('SELECT * FROM orders WHERE id = ?', newOrderId)
+      const newItems = await db.all<any>('SELECT * FROM items WHERE orderId = ?', newOrderId)
+      
+      if (newOrder) {
+        newOrder.items = newItems.map((item: any) => ({
+          ...item,
+          params: typeof item.params === 'string' ? JSON.parse(item.params) : item.params
+        }))
+      }
+
+      res.status(201).json(newOrder)
     })
   )
 
@@ -818,30 +1149,121 @@ async function main() {
     })
   )
 
+  // ===== Calculators (MVP) =====
+  const FLYERS_SCHEMA = {
+    slug: 'flyers-color',
+    name: 'Листовки цветные',
+    options: {
+      format: ['A6', 'A5', 'A4'],
+      sides: [1, 2],
+      qtySteps: [50, 100, 200, 300, 500, 1000, 2000, 5000],
+      paperDensity: [130, 170],
+      lamination: ['none', 'matte', 'glossy'],
+      priceType: ['rush', 'online', 'promo']
+    }
+  }
+  // Qty-based discount is embedded into pricing tiers now to match karandash.by.
+  // Keep function returning 1 to avoid double-discounting.
+  const FLYERS_QTY_DISCOUNTS: Array<{ minQty: number; k: number }> = []
+  function getQtyDiscountK(_qty: number): number { return 1 }
+  const FLYERS_BASE_PRICE: Record<string, number> = { // BYN per item, 1 side
+    A6: 0.05,
+    A5: 0.08,
+    A4: 0.12
+  }
+  // Sheet-based pricing (BYN per SRA3 sheet, single-side)
+  const FLYERS_SHEET_PRICE: Record<number, number> = { 130: 0.4, 150: 0.5 }
+  const LAM_SHEET_PRICE: Record<string, number> = { matte: 0.2, glossy: 0.2 }
+  const FLYERS_UP_ON_SRA3: Record<string, number> = {
+    A6: 8,
+    A5: 4,
+    A4: 2
+  }
+  function getMaterialIdByDensity(d: number): Promise<number | undefined> {
+    const name = d >= 150 ? 'Бумага мелованная 150 г/м², SRA3' : 'Бумага мелованная 130 г/м², SRA3'
+    return db.get<{ id: number }>('SELECT id FROM materials WHERE name = ?', name).then(r => (r as any)?.id)
+  }
+  function getLaminationMatId(type: string): Promise<number | undefined> {
+    const name = type === 'glossy' ? 'Плёнка ламинации глянцевая 35 мкм, SRA3' : 'Плёнка ламинации матовая 35 мкм, SRA3'
+    return db.get<{ id: number }>('SELECT id FROM materials WHERE name = ?', name).then(r => (r as any)?.id)
+  }
+  app.get('/api/calculators/flyers-color', (_req, res) => {
+    res.json(FLYERS_SCHEMA)
+  })
+  // Anchor totals from karandash.by for A6, qty=100, sides=2, lamination=none (to calibrate multipliers)
+  const FLYERS_ANCHOR_TOTAL: Record<'rush'|'online'|'promo', number> = {
+    rush: Number(process.env.FLYERS_ANCHOR_RUSH || 104.85),
+    online: Number(process.env.FLYERS_ANCHOR_ONLINE || 89.86),
+    promo: Number(process.env.FLYERS_ANCHOR_PROMO || 41.23)
+  }
+  async function resolveSheetSinglePrice(format: string, priceType: 'rush'|'online'|'promo', qty: number, paperDensity: number): Promise<number> {
+    const row = await db.get<{ sheet_price_single: number }>(
+      `SELECT sheet_price_single FROM pricing_flyers_tiers
+        WHERE format = ? AND price_type = ? AND paper_density = ? AND min_qty <= ?
+        ORDER BY min_qty DESC LIMIT 1`, format, priceType, paperDensity, qty
+    )
+    return Number((row as any)?.sheet_price_single || 0)
+  }
+
+  app.post('/api/calculators/flyers-color/price', async (req, res) => {
+    const { format, qty, sides, paperDensity, lamination, priceType } = (req.body || {}) as {
+      format: 'A6'|'A5'|'A4'; qty: number; sides: 1|2; paperDensity: 130|150; lamination: 'none'|'matte'|'glossy'; priceType?: 'rush'|'online'|'promo'
+    }
+    if (!format || !qty || !sides) { res.status(400).json({ message: 'format, qty, sides обязательны' }); return }
+    const up = FLYERS_UP_ON_SRA3[format] || 8
+    const sra3PerItem = 1 / up
+    const wasteRatio = 0.02
+    const totalSheets = Math.ceil(qty * sra3PerItem * (1 + wasteRatio))
+
+    // Sheet-based price
+    const baseSheet = FLYERS_SHEET_PRICE[Number(paperDensity) || 130] ?? 0.4
+    const sidesK = sides === 2 ? 1.6 : 1
+    // Flyers: ламинацию для листовок не учитываем в стоимости
+    const lamPS = 0
+    const type = (priceType || 'rush') as 'rush'|'online'|'promo'
+    // Pricing from tiers table
+    const singleFromTier = await resolveSheetSinglePrice(format, type, Number(qty) || 0, Number(paperDensity) || 130)
+    const sheetPrice = Math.round(((singleFromTier * sidesK) + lamPS) * 100) / 100
+    const discountK = getQtyDiscountK(Number(qty) || 0)
+    const totalPrice = Math.round((totalSheets * sheetPrice * discountK) * 100) / 100
+    const pricePerItem = Math.round(((totalPrice / Math.max(1, qty))) * 100) / 100
+
+    const paperId = await getMaterialIdByDensity(Number(paperDensity) || 130)
+    // Flyers: не добавляем компонент ламинации
+    const lamId = undefined
+    const components: Array<{ materialId: number; qtyPerItem: number }> = []
+    if (paperId) components.push({ materialId: paperId, qtyPerItem: sra3PerItem * (1 + wasteRatio) })
+    if (lamId) components.push({ materialId: lamId, qtyPerItem: sra3PerItem * (1 + wasteRatio) })
+
+    res.json({ pricePerItem, totalPrice, totalSheets, components, derived: { up, sra3PerItem, wasteRatio, discountK } })
+  })
+
   // POST /api/materials — создать или обновить материал
   app.post(
     '/api/materials',
     asyncHandler(async (req, res) => {
       const user = (req as any).user as { id: number; role: string } | undefined
       if (!user || user.role !== 'admin') { res.status(403).json({ message: 'Forbidden' }); return }
-      const mat = req.body as Material
+      const mat = req.body as Material & { sheet_price_single?: number | null }
       try {
         if (mat.id) {
           await db.run(
-            'UPDATE materials SET name = ?, unit = ?, quantity = ?, min_quantity = ? WHERE id = ?',
+            'UPDATE materials SET name = ?, unit = ?, quantity = ?, min_quantity = ?, sheet_price_single = ? WHERE id = ?',
             mat.name,
             mat.unit,
             mat.quantity,
             mat.min_quantity ?? null,
+            mat.sheet_price_single ?? null,
             mat.id
           )
         } else {
           await db.run(
-            'INSERT INTO materials (name, unit, quantity, min_quantity) VALUES (?, ?, ?, ?)',
+            'INSERT INTO materials (name, unit, quantity, min_quantity, sheet_price_single) VALUES (?, ?, ?, ?, ?)',
             mat.name,
             mat.unit,
             mat.quantity,
-            mat.min_quantity ?? null
+            mat.min_quantity ?? null,
+            mat.sheet_price_single ?? null
           )
         }
       } catch (e: any) {
@@ -852,10 +1274,34 @@ async function main() {
         }
         throw e
       }
-      const allMats = await db.all<Material>(
-        'SELECT id, name, unit, quantity, min_quantity as min_quantity FROM materials ORDER BY name'
+      const allMats = await db.all<Material & { sheet_price_single: number | null }>(
+        'SELECT id, name, unit, quantity, min_quantity as min_quantity, sheet_price_single FROM materials ORDER BY name'
       ) as any
       res.json(allMats)
+    })
+  )
+
+  // Admin utility: normalize item prices to price-per-item for a specific order
+  app.post(
+    '/api/orders/:id/normalize-prices',
+    asyncHandler(async (req, res) => {
+      const user = (req as any).user as { id: number; role: string } | undefined
+      if (!user || user.role !== 'admin') { res.status(403).json({ message: 'Forbidden' }); return }
+      const orderId = Number(req.params.id)
+      const items = await db.all<any>('SELECT id, price, quantity FROM items WHERE orderId = ?', orderId)
+      let updated = 0
+      for (const it of items) {
+        const qty = Math.max(1, Number(it.quantity) || 1)
+        const price = Number(it.price) || 0
+        // Heuristic: if qty>1 and price likely contains total (per-item > 10 BYN or qty>=50 and per-item > 3 BYN)
+        const perItem = price / qty
+        const shouldFix = qty > 1 && (perItem === 0 ? false : (perItem > 10 || (qty >= 50 && perItem > 3)))
+        if (shouldFix) {
+          await db.run('UPDATE items SET price = ? WHERE id = ? AND orderId = ?', perItem, it.id, orderId)
+          updated++
+        }
+      }
+      res.json({ orderId, updated })
     })
   )
 
@@ -1120,15 +1566,17 @@ async function main() {
 
   // Error-handling middleware
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-    console.error('🔥 Unhandled error:', err)
-    res
-      .status(err.status || 500)
-      .json({ error: err.message, stack: err.stack })
+    const showStack = (process.env.NODE_ENV !== 'production') && (process.env.SHOW_ERROR_STACK !== 'false')
+    const payload: any = { error: err.message }
+    if (showStack) payload.stack = err.stack
+    // JSON structured log
+    try { console.error(JSON.stringify({ level: 'error', msg: err.message, stack: showStack ? err.stack : undefined })) } catch {}
+    res.status(err.status || 500).json(payload)
   })
 
   const PORT = Number(process.env.PORT || 3001)
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 API running at http://localhost:${PORT}`)
+    try { console.log(JSON.stringify({ level: 'info', msg: 'API started', port: PORT })) } catch { console.log(`🚀 API running at http://localhost:${PORT}`) }
   })
 }
 
